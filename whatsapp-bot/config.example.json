@@ -1,0 +1,8 @@
+{
+  "supabaseUrl": "https://SEU-PROJETO.supabase.co",
+  "chavePublica": "CHAVE_PUBLICA_DO_SUPABASE",
+  "segredo": "SEGREDO_MOSTRADO_AO_RODAR_O_BANCO_SQL",
+  "linkApp": "https://SEU-SITE.netlify.app",
+  "grupoId": "",
+  "grupoNome": ""
+}

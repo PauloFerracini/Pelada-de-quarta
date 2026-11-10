@@ -1,0 +1,12 @@
+# Dependências (reinstalar com "npm install" dentro de whatsapp-bot)
+node_modules/
+
+# Dados sensíveis do programa de WhatsApp: nunca enviar ao GitHub
+whatsapp-bot/sessao/
+whatsapp-bot/config.json
+whatsapp-bot/envios.log
+
+# Arquivos locais
+.claude/
+.env
+*.log
