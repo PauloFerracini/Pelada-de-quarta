@@ -4,6 +4,30 @@
   const CFG = window.PELADA_CONFIG || {};
   const DEMO = !CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY;
   const TZ = 'America/Sao_Paulo';
+
+  // Login por número do WhatsApp: por dentro, o número vira um "e-mail" fixo neste domínio.
+  // Não mude este valor depois que houver contas criadas, ou os números deixam de entrar.
+  const DOMINIO_TELEFONE = 'peladaquarta.netlify.app';
+
+  // "(21) 99999-8888" -> "5521999998888". Devolve null se não parecer um celular/fixo com DDD.
+  function normalizarTelefone(valor) {
+    let d = String(valor || '').replace(/\D/g, '').replace(/^0+/, '');
+    if (d.length === 10 || d.length === 11) d = '55' + d;
+    return /^55\d{10,11}$/.test(d) ? d : null;
+  }
+  // Aceita e-mail (contas antigas) ou número do WhatsApp e devolve o login usado no banco.
+  function loginParaEmail(valor) {
+    const v = String(valor || '').trim().toLowerCase();
+    if (v.includes('@')) return v;
+    const tel = normalizarTelefone(v);
+    if (!tel) throw new Error('Informe o número do WhatsApp com DDD, por exemplo (21) 99999-8888.');
+    return `${tel}@${DOMINIO_TELEFONE}`;
+  }
+  function fmtLogin(login) {
+    if (!login) return '';
+    const m = login.match(new RegExp('^55(\\d{2})(\\d{4,5})(\\d{4})@' + DOMINIO_TELEFONE.replace(/\./g, '\\.') + '$'));
+    return m ? `(${m[1]}) ${m[2]}-${m[3]}` : login;
+  }
   const $app = document.getElementById('app');
   const $aviso = document.getElementById('aviso');
 
@@ -97,7 +121,7 @@
         const d = ler();
         email = email.toLowerCase();
         if (senha.length < 6) throw new Error('A senha precisa ter pelo menos 6 caracteres.');
-        if (d.usuarios.some((x) => x.email === email)) throw new Error('Este e-mail já tem conta.');
+        if (d.usuarios.some((x) => x.email === email)) throw new Error('Já existe uma conta com esse número.');
         const id = 'u' + Math.random().toString(36).slice(2, 10);
         d.usuarios.push({ id, nome, email, senha, tipo: 'diarista', goleiro: false, admin: !d.usuarios.some((x) => x.admin) });
         d.sessao = id; gravar();
@@ -118,7 +142,15 @@
           movimentos: (d.historico || [])
             .filter((h) => h.partida_id === partida.id && (h.tipo === 'entrou' || h.tipo === 'saiu')).reverse(),
           acoesAdmin: eu && eu.admin ? (d.historico || []).filter((h) => h.por_admin).reverse().slice(0, 80) : [],
+          logins: eu && eu.admin ? d.usuarios.map((u) => ({ id: u.id, login: u.email })) : [],
         };
+      },
+      async redefinirSenha(id, senha) {
+        const d = ler(); exigirAdmin(d);
+        if (senha.length < 6) throw new Error('A senha precisa ter pelo menos 6 caracteres.');
+        d.usuarios.find((u) => u.id === id).senha = senha;
+        registrar(d, 'perfil', null, id, 'senha redefinida pelo administrador');
+        gravar();
       },
       // A demonstração só guarda a partida atual; para ilustrar o relatório, repete a lista de hoje
       // como se fosse a partida da semana passada.
@@ -202,8 +234,8 @@
     const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 
     const traducoes = [
-      ['Invalid login credentials', 'E-mail ou senha incorretos.'],
-      ['User already registered', 'Este e-mail já tem conta.'],
+      ['Invalid login credentials', 'Número (ou e-mail) ou senha incorretos.'],
+      ['User already registered', 'Já existe uma conta com esse número.'],
       ['Password should be at least', 'A senha precisa ter pelo menos 6 caracteres.'],
       ['Email not confirmed', 'Confirme seu e-mail antes de entrar (veja sua caixa de entrada).'],
       ['rate limit', 'Muitas tentativas. Aguarde alguns minutos e tente de novo.'],
@@ -252,11 +284,20 @@
           sb.from('historico').select('*').eq('por_admin', true)
             .order('criado_em', { ascending: false }).order('id', { ascending: false }).limit(80),
         ]);
+        // Logins (telefone ou e-mail) só para administradores; depende do telefone.sql.
+        let logins = [];
+        if ((perfis.find((p) => p.id === uid) || {}).admin) {
+          const r = await sb.rpc('admin_logins');
+          if (!r.error) logins = r.data;
+        }
         return {
-          eu: uid, partida, perfis, presencas, config, pagamentos,
+          eu: uid, partida, perfis, presencas, config, pagamentos, logins,
           movimentos: mov.error ? null : mov.data,
           acoesAdmin: adm.error ? [] : adm.data,
         };
+      },
+      async redefinirSenha(id, senha) {
+        ok(await sb.rpc('admin_redefinir_senha', { p_user: id, p_senha: senha }));
       },
       async relatorio() {
         const partidas = ok(await sb.from('partidas').select('*').lt('fim', new Date().toISOString())
@@ -343,7 +384,13 @@
       <form class="cartao" data-form="auth">
         <h2>${titulos[authModo]}</h2>
         ${authModo === 'cadastrar' ? '<label>Nome ou apelido<input name="nome" required maxlength="40" autocomplete="nickname"></label>' : ''}
-        <label>E-mail<input name="email" type="email" required autocomplete="email"></label>
+        ${authModo === 'cadastrar'
+          ? '<label>WhatsApp (com DDD)<input name="email" type="tel" required autocomplete="tel" placeholder="(21) 99999-8888"></label>'
+          : authModo === 'entrar'
+          ? '<label>WhatsApp (com DDD) ou e-mail<input name="email" type="text" required autocomplete="username" placeholder="(21) 99999-8888"></label>'
+          : `<p class="nota">Cadastrou com o número do WhatsApp? Peça ao organizador para redefinir sua senha.
+             Se cadastrou com e-mail, informe-o abaixo para receber o link.</p>
+             <label>E-mail<input name="email" type="email" required autocomplete="email"></label>`}
         ${authModo !== 'esqueci'
           ? `<label>Senha<input name="senha" type="password" minlength="6" required autocomplete="${authModo === 'cadastrar' ? 'new-password' : 'current-password'}"></label>`
           : ''}
@@ -517,7 +564,7 @@
         ${perfis.map((p) => {
           const naLista = dados.presencas.some((x) => x.user_id === p.id);
           return `<div class="linha-admin">
-            <strong>${esc(p.nome)}${p.id === dados.eu ? ' (você)' : ''}</strong>
+            <strong>${esc(p.nome)}${p.id === dados.eu ? ' (você)' : ''}<small class="quando">${esc(fmtLogin((dados.logins.find((l) => l.id === p.id) || {}).login))}</small></strong>
             <button class="pequeno" data-acao="${naLista ? 'remover' : 'incluir'}" data-id="${esc(p.id)}">${naLista ? 'Tirar da lista' : 'Pôr na lista'}</button>
             <div class="opcoes">
               <select data-perfil="${esc(p.id)}" data-campo="tipo" aria-label="Tipo de ${esc(p.nome)}">
@@ -526,6 +573,7 @@
               </select>
               <label class="marca"><input type="checkbox" data-perfil="${esc(p.id)}" data-campo="goleiro" ${p.goleiro ? 'checked' : ''}>Goleiro fixo</label>
               <label class="marca"><input type="checkbox" data-perfil="${esc(p.id)}" data-campo="admin" ${p.admin ? 'checked' : ''} ${p.id === dados.eu ? 'disabled' : ''}>Administrador</label>
+              ${p.id === dados.eu ? '' : `<button class="pequeno" data-acao="redefinir-senha" data-id="${esc(p.id)}">Redefinir senha</button>`}
             </div>
           </div>`;
         }).join('')}
@@ -584,6 +632,13 @@
       if (confirm(`Tirar ${p.nome} da lista desta partida?`)) executar(() => api.cancelar(dados.partida.id, p.id));
     },
     'incluir': (b) => executar(() => api.confirmar(dados.partida.id, b.dataset.id)),
+    'redefinir-senha': (b) => {
+      const p = perfilDe(b.dataset.id);
+      const senha = prompt(`Nova senha para ${p.nome} (mínimo de 6 caracteres). Depois, avise a pessoa.`);
+      if (senha === null) return;
+      if (senha.length < 6) return aviso('A senha precisa ter pelo menos 6 caracteres.', true);
+      executar(() => api.redefinirSenha(p.id, senha), `Senha de ${p.nome} redefinida.`);
+    },
     'pago-mensal': (b) => {
       const id = b.dataset.id, pg = pagoMensal(id);
       executar(() => pg ? api.desmarcarPago(pg.id)
@@ -598,7 +653,7 @@
       try { await navigator.clipboard.writeText(dados.config.chave_pix); aviso('Chave Pix copiada.'); }
       catch (e) { aviso('Não foi possível copiar. Selecione a chave e copie manualmente.', true); }
     },
-    'sair': () => executar(() => api.sair()),
+    'sair': () => { authModo = 'entrar'; executar(() => api.sair()); },
     'reiniciar-demo': () => {
       if (!confirm('Apagar as contas e os dados da demonstração neste aparelho?')) return;
       try { localStorage.removeItem('pelada-demo-v1'); } catch (e) { /* nada a apagar */ }
@@ -635,9 +690,10 @@
         recuperando = false;
         aviso('Senha alterada.');
       } else if (authModo === 'entrar') {
-        await api.entrar(f.email.trim(), f.senha);
+        await api.entrar(loginParaEmail(f.email), f.senha);
       } else if (authModo === 'cadastrar') {
-        const r = await api.cadastrar(f.nome.trim(), f.email.trim(), f.senha);
+        if (f.email.includes('@')) throw new Error('Informe o número do WhatsApp com DDD, por exemplo (21) 99999-8888.');
+        const r = await api.cadastrar(f.nome.trim(), loginParaEmail(f.email), f.senha);
         if (r === 'confirmar') {
           authModo = 'entrar';
           aviso('Conta criada. Confirme pelo link que enviamos ao seu e-mail e depois entre.');

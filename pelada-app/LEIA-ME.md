@@ -7,6 +7,8 @@ lista de espera dos diaristas, goleiros fixos à parte e controle de pagamentos.
 
 - `site/` — o app (é esta pasta que vai para a internet).
 - `supabase.sql` — cria o banco de dados e as regras de acesso.
+- `telefone.sql` — rode depois do `supabase.sql`: mostra ao organizador o login de cada jogador
+  (número do WhatsApp ou e-mail) e permite redefinir a senha de quem esqueceu.
 - `historico.sql` — rode depois do `supabase.sql`: registra entradas e saídas da lista e as
   alterações dos administradores (abas Histórico e Organizar > Relatórios).
 - `teste-logica.js` — testes das regras da lista (`node teste-logica.js`).
