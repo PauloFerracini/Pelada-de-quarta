@@ -68,3 +68,34 @@ assert.equal(proximaQuarta(new Date('2026-11-11T22:30:00-03:00')).data, '2026-11
 assert.equal(proximaQuarta(new Date('2026-11-12T00:30:00-03:00')).data, '2026-11-18'); // quinta de madrugada
 
 console.log('Todos os testes passaram.');
+
+// 7. Relatório: frequência por jogador e resumo por partida.
+{
+  const { relatorio } = require('./site/logica.js');
+  const perfis = [
+    { id: 'a', nome: 'Ana', tipo: 'mensalista', goleiro: false },
+    { id: 'b', nome: 'Bia', tipo: 'diarista', goleiro: false },
+    { id: 'c', nome: 'Caio', tipo: 'mensalista', goleiro: true },
+    { id: 'd', nome: 'Davi', tipo: 'diarista', goleiro: false },
+  ];
+  const p1 = { id: 1, data: '2026-11-04', prioridade_ate: '2026-11-04T17:00:00-03:00', fim: '2026-11-04T22:00:00-03:00' };
+  const p2 = { id: 2, data: '2026-11-11', prioridade_ate: '2026-11-11T17:00:00-03:00', fim: '2026-11-11T22:00:00-03:00' };
+  const rel = relatorio({
+    partidas: [p2, p1], perfis, vagas: 1,
+    presencas: [
+      { partida_id: 1, user_id: 'a', criado_em: '2026-11-03T10:00:00-03:00' },
+      { partida_id: 1, user_id: 'b', criado_em: '2026-11-03T11:00:00-03:00' },
+      { partida_id: 1, user_id: 'c', criado_em: '2026-11-03T12:00:00-03:00' },
+      { partida_id: 2, user_id: 'b', criado_em: '2026-11-10T09:00:00-03:00' },
+    ],
+    saidas: [
+      { partida_id: 2, user_id: 'a', criado_em: '2026-11-11T18:00:00-03:00' }, // depois das 17h
+      { partida_id: 2, user_id: 'd', criado_em: '2026-11-10T08:00:00-03:00' }, // antes das 17h
+    ],
+  });
+  assert.deepEqual(rel.porPartida.map((r) => [r.partida.id, r.jogadores, r.goleiros, r.espera, r.saidas, r.saidasTarde]),
+    [[2, 1, 0, 0, 2, 1], [1, 1, 1, 1, 0, 0]]);
+  const j = Object.fromEntries(rel.jogadores.map((x) => [x.perfil.id, [x.jogou, x.espera, x.saidas, x.saidasTarde]]));
+  assert.deepEqual(j, { a: [1, 0, 1, 1], b: [1, 1, 0, 0], c: [1, 0, 0, 0], d: [0, 0, 1, 0] });
+  console.log('Relatório: ok.');
+}

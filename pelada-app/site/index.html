@@ -57,6 +57,19 @@
   ol.lista li::before { content: counter(n); width: 24px; text-align: right; color: var(--suave); font-variant-numeric: tabular-nums; font-size: 14px; }
   ol.lista .nome { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   ol.lista li.eu .nome { font-weight: 700; }
+  .quando { display: block; font-size: 12px; font-weight: 400; color: var(--suave); }
+  ul.lista { list-style: none; margin: 0; padding: 0; }
+  ul.lista li { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--linha); }
+  ul.lista li:first-child { border-top: 0; }
+  ul.lista .nome { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  ul.lista li.eu .nome { font-weight: 700; }
+  ul.lista li.eu .quando { font-weight: 400; }
+  .cartao > .nota { margin-bottom: 8px; }
+  .rolagem { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: center; padding: 8px 6px; border-top: 1px solid var(--linha); }
+  th { color: var(--suave); font-weight: 600; font-size: 12px; border-top: 0; }
+  th:first-child, td:first-child { text-align: left; }
   .etiqueta { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--verde-claro); color: var(--verde); white-space: nowrap; }
   .etiqueta.cinza { background: var(--linha); color: var(--suave); }
   .etiqueta.ok { background: var(--verde-claro); color: var(--verde); }
@@ -73,7 +86,7 @@
   .marca { display: inline-flex; align-items: center; gap: 6px; color: var(--texto); font-size: 14px; }
   .marca input { width: 18px; height: 18px; min-height: 0; }
   .subabas { display: flex; gap: 8px; margin-bottom: 14px; }
-  .subabas button { flex: 1; padding: 8px; min-height: 40px; font-size: 14px; }
+  .subabas button { flex: 1; padding: 8px 4px; min-height: 40px; font-size: 13px; }
   .subabas .ativa { background: var(--verde-claro); color: var(--verde); border-color: transparent; }
   .pix { display: flex; gap: 8px; align-items: center; background: var(--fundo); border-radius: 10px; padding: 10px 12px; margin: 8px 0 4px; }
   .pix code { flex: 1; overflow-wrap: anywhere; font-size: 15px; }

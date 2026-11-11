@@ -21,6 +21,9 @@
     const [a, m] = mes.split('-');
     return new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC', month: 'long', year: 'numeric' }).format(new Date(Date.UTC(+a, +m - 1, 1)));
   };
+  const fmtQuando = (iso) =>
+    new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      .format(new Date(iso)).replace('.,', '').replace(',', '');
   const fmtValor = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
   let avisoTimer;
@@ -69,6 +72,17 @@
       const eu = d.usuarios.find((u) => u.id === d.sessao);
       if (!eu || !eu.admin) throw new Error('Apenas o administrador pode fazer isso.');
     };
+    // Mesmo registro que os gatilhos do banco fazem no app publicado.
+    const registrar = (d, tipo, partida_id, user_id, detalhe, entrada_em) => {
+      const nomeDe = (id) => (d.usuarios.find((u) => u.id === id) || {}).nome || '';
+      d.historico = d.historico || [];
+      d.historico.push({
+        id: d.seq++, criado_em: new Date().toISOString(), tipo, partida_id, user_id, nome: nomeDe(user_id),
+        autor_id: d.sessao, autor_nome: nomeDe(d.sessao),
+        por_admin: ['perfil', 'pagamento', 'config'].includes(tipo) || d.sessao !== user_id,
+        entrada_em: entrada_em || null, detalhe: detalhe || '',
+      });
+    };
 
     return {
       aoRecuperarSenha() {},
@@ -101,28 +115,77 @@
           perfis: d.usuarios.map(({ senha, email, ...resto }) => resto).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')),
           presencas: d.presencas.filter((x) => x.partida_id === partida.id),
           pagamentos: d.pagamentos.filter((x) => (eu && eu.admin) || x.user_id === uid),
+          movimentos: (d.historico || [])
+            .filter((h) => h.partida_id === partida.id && (h.tipo === 'entrou' || h.tipo === 'saiu')).reverse(),
+          acoesAdmin: eu && eu.admin ? (d.historico || []).filter((h) => h.por_admin).reverse().slice(0, 80) : [],
+        };
+      },
+      // A demonstração só guarda a partida atual; para ilustrar o relatório, repete a lista de hoje
+      // como se fosse a partida da semana passada.
+      async relatorio() {
+        const d = ler();
+        const semana = 7 * 24 * 3600 * 1000;
+        const menos7 = (iso) => new Date(new Date(iso).getTime() - semana).toISOString();
+        const p = Logica.proximaQuarta(new Date());
+        const partida = { id: 'anterior', data: menos7(p.inicio).slice(0, 10), inicio: menos7(p.inicio), fim: menos7(p.fim), prioridade_ate: menos7(p.prioridade_ate) };
+        return {
+          partidas: [partida],
+          presencas: d.presencas.filter((x) => x.partida_id === p.data)
+            .map((x) => ({ ...x, partida_id: 'anterior', criado_em: menos7(x.criado_em) })),
+          saidas: (d.historico || []).filter((h) => h.tipo === 'saiu' && h.partida_id === p.data)
+            .map((h) => ({ partida_id: 'anterior', user_id: h.user_id, criado_em: menos7(h.criado_em) })),
         };
       },
       async confirmar(partida_id, user_id) {
         const d = ler();
         if (user_id !== d.sessao) exigirAdmin(d);
-        if (!d.presencas.some((x) => x.partida_id === partida_id && x.user_id === user_id))
+        if (!d.presencas.some((x) => x.partida_id === partida_id && x.user_id === user_id)) {
           d.presencas.push({ partida_id, user_id, criado_em: new Date().toISOString() });
+          registrar(d, 'entrou', partida_id, user_id);
+        }
         gravar();
       },
       async cancelar(partida_id, user_id) {
         const d = ler();
         if (user_id !== d.sessao) exigirAdmin(d);
-        d.presencas = d.presencas.filter((x) => !(x.partida_id === partida_id && x.user_id === user_id));
+        const atual = d.presencas.find((x) => x.partida_id === partida_id && x.user_id === user_id);
+        if (atual) {
+          d.presencas = d.presencas.filter((x) => x !== atual);
+          registrar(d, 'saiu', partida_id, user_id, '', atual.criado_em);
+        }
         gravar();
       },
       async atualizarPerfil(id, campos) {
         const d = ler(); exigirAdmin(d);
-        Object.assign(d.usuarios.find((u) => u.id === id), campos); gravar();
+        Object.assign(d.usuarios.find((u) => u.id === id), campos);
+        const [campo, valor] = Object.entries(campos)[0];
+        registrar(d, 'perfil', null, id,
+          campo === 'tipo' ? `tipo alterado para ${valor}`
+            : campo === 'goleiro' ? (valor ? 'virou goleiro fixo' : 'deixou de ser goleiro fixo')
+            : (valor ? 'virou administrador' : 'deixou de ser administrador'));
+        gravar();
       },
-      async marcarPago(p) { const d = ler(); exigirAdmin(d); d.pagamentos.push({ id: d.seq++, ...p }); gravar(); },
-      async desmarcarPago(id) { const d = ler(); exigirAdmin(d); d.pagamentos = d.pagamentos.filter((x) => x.id !== id); gravar(); },
-      async salvarConfig(campos) { const d = ler(); exigirAdmin(d); Object.assign(d.config, campos); gravar(); },
+      async marcarPago(p) {
+        const d = ler(); exigirAdmin(d);
+        d.pagamentos.push({ id: d.seq++, ...p });
+        registrar(d, 'pagamento', p.partida_id || null, p.user_id,
+          `${p.tipo === 'mensal' ? 'mensalidade de ' + p.mes : 'diária'} marcada como paga`);
+        gravar();
+      },
+      async desmarcarPago(id) {
+        const d = ler(); exigirAdmin(d);
+        const p = d.pagamentos.find((x) => x.id === id);
+        d.pagamentos = d.pagamentos.filter((x) => x.id !== id);
+        if (p) registrar(d, 'pagamento', p.partida_id || null, p.user_id,
+          `${p.tipo === 'mensal' ? 'mensalidade de ' + p.mes : 'diária'} desmarcada`);
+        gravar();
+      },
+      async salvarConfig(campos) {
+        const d = ler(); exigirAdmin(d);
+        Object.assign(d.config, campos);
+        registrar(d, 'config', null, null, 'configurações alteradas');
+        gravar();
+      },
     };
   }
 
@@ -182,7 +245,29 @@
           sb.from('config').select('*').eq('id', 1).single(),
           sb.from('pagamentos').select('*').or(`mes.eq.${mes},partida_id.eq.${partida.id}`),
         ])).map(ok);
-        return { eu: uid, partida, perfis, presencas, config, pagamentos };
+        // O histórico é opcional: se o historico.sql ainda não foi rodado, o app segue sem ele.
+        const [mov, adm] = await Promise.all([
+          sb.from('historico').select('*').eq('partida_id', partida.id).in('tipo', ['entrou', 'saiu'])
+            .order('criado_em', { ascending: false }).order('id', { ascending: false }).limit(300),
+          sb.from('historico').select('*').eq('por_admin', true)
+            .order('criado_em', { ascending: false }).order('id', { ascending: false }).limit(80),
+        ]);
+        return {
+          eu: uid, partida, perfis, presencas, config, pagamentos,
+          movimentos: mov.error ? null : mov.data,
+          acoesAdmin: adm.error ? [] : adm.data,
+        };
+      },
+      async relatorio() {
+        const partidas = ok(await sb.from('partidas').select('*').lt('fim', new Date().toISOString())
+          .order('data', { ascending: false }).limit(8));
+        if (!partidas.length) return { partidas, presencas: [], saidas: [] };
+        const ids = partidas.map((p) => p.id);
+        const [presencas, saidas] = (await Promise.all([
+          sb.from('presencas').select('*').in('partida_id', ids),
+          sb.from('historico').select('partida_id,user_id,criado_em').eq('tipo', 'saiu').in('partida_id', ids),
+        ])).map(ok);
+        return { partidas, presencas, saidas };
       },
       async confirmar(partida_id, user_id) { ok(await sb.from('presencas').insert({ partida_id, user_id })); },
       async cancelar(partida_id, user_id) {
@@ -199,8 +284,9 @@
 
   let api = null;
   let dados = null;          // null = deslogado
-  let aba = 'jogo';          // jogo | pagamento | admin
-  let adminAba = 'pagamentos'; // pagamentos | jogadores | config
+  let aba = 'jogo';          // jogo | historico | pagamento | admin
+  let adminAba = 'pagamentos'; // pagamentos | jogadores | relatorios | config
+  let relatorioDados = null; // carregado ao abrir Organizar > Relatórios
   let authModo = 'entrar';   // entrar | cadastrar | esqueci
   let recuperando = false;
   let ocupado = false;
@@ -273,7 +359,7 @@
   function itemLista(i, admin) {
     const p = i.perfil;
     return `<li class="${p.id === dados.eu ? 'eu' : ''}">
-      <span class="nome">${esc(p.nome)}${p.id === dados.eu ? ' (você)' : ''}</span>
+      <span class="nome">${esc(p.nome)}${p.id === dados.eu ? ' (você)' : ''}<small class="quando">entrou ${esc(fmtQuando(i.criado_em))}</small></span>
       <span class="etiqueta ${p.tipo === 'diarista' ? 'cinza' : ''}">${p.tipo === 'mensalista' ? 'Mensalista' : 'Diarista'}</span>
       ${admin ? `<button class="pequeno" data-acao="remover" data-id="${esc(p.id)}" aria-label="Tirar ${esc(p.nome)} da lista">Tirar</button>` : ''}
     </li>`;
@@ -320,6 +406,59 @@
       ${secaoLista('Goleiros', a.goleiros.length, a.goleiros, 'Nenhum goleiro confirmou ainda.', meu.admin)}
       ${secaoLista('Lista de espera', a.espera.length, a.espera, 'Ninguém na espera.', meu.admin)}
       <button class="link" data-acao="atualizar">Atualizar lista</button>`;
+  }
+
+  function telaHistorico() {
+    const meu = eu();
+    const mov = dados.movimentos;
+    const porQuem = (h) => (h.por_admin ? ` — por ${esc(h.autor_nome || 'sistema')}` : '');
+    const linhaMov = (h) => `<li class="${h.user_id === dados.eu ? 'eu' : ''}">
+      <span class="nome">${esc(h.nome)} ${h.tipo === 'entrou' ? 'entrou na lista' : 'saiu da lista'}${porQuem(h)}
+        <small class="quando">${esc(fmtQuando(h.criado_em))}${h.tipo === 'saiu' && h.entrada_em ? ` · estava na lista desde ${esc(fmtQuando(h.entrada_em))}` : ''}</small></span>
+      <span class="etiqueta ${h.tipo === 'entrou' ? 'ok' : 'pendente'}">${h.tipo === 'entrou' ? 'Entrada' : 'Saída'}</span>
+    </li>`;
+    const linhaAdm = (h) => {
+      const oQue = h.tipo === 'entrou' ? `pôs ${esc(h.nome)} na lista`
+        : h.tipo === 'saiu' ? `tirou ${esc(h.nome)} da lista`
+        : h.tipo === 'config' ? esc(h.detalhe)
+        : `${esc(h.nome)}: ${esc(h.detalhe)}`;
+      return `<li><span class="nome">${esc(h.autor_nome || 'Sistema')} — ${oQue}
+        <small class="quando">${esc(fmtQuando(h.criado_em))}</small></span></li>`;
+    };
+    return `
+      <section class="cartao"><h2>Movimentações desta partida<span>${mov ? mov.length : 0}</span></h2>
+        <p class="nota">Entradas e saídas da lista de ${esc(fmtDiaMes(dados.partida.inicio))}, da mais recente para a mais antiga.</p>
+        ${mov === null ? '<p class="vazio">O histórico ainda não foi ativado no banco de dados.</p>'
+          : mov.length ? `<ul class="lista sem-numero">${mov.map(linhaMov).join('')}</ul>`
+          : '<p class="vazio">Nenhuma movimentação ainda.</p>'}
+      </section>
+      ${meu.admin ? `<section class="cartao"><h2>Alterações dos administradores<span>${dados.acoesAdmin.length}</span></h2>
+        <p class="nota">Últimas ações feitas por administradores: lista, cadastro de jogadores, pagamentos e configurações.</p>
+        ${dados.acoesAdmin.length ? `<ul class="lista sem-numero">${dados.acoesAdmin.map(linhaAdm).join('')}</ul>`
+          : '<p class="vazio">Nenhuma alteração registrada.</p>'}
+      </section>` : ''}`;
+  }
+
+  function telaRelatorios() {
+    if (!relatorioDados) return '<section class="cartao"><p class="vazio">Carregando relatórios…</p></section>';
+    if (!relatorioDados.partidas.length)
+      return '<section class="cartao"><h2>Relatórios</h2><p class="vazio">Ainda não há partidas encerradas. Os relatórios aparecem depois do primeiro jogo.</p></section>';
+    const r = Logica.relatorio({ ...relatorioDados, perfis: dados.perfis, vagas: dados.config.vagas });
+    const n = r.porPartida.length;
+    return `
+      <section class="cartao"><h2>Frequência por jogador<span>${n === 1 ? 'última partida' : `últimas ${n} partidas`}</span></h2>
+        <div class="rolagem"><table>
+          <thead><tr><th>Jogador</th><th>Jogou</th><th>Ficou na espera</th><th>Saiu da lista</th><th>Saiu após 17h</th></tr></thead>
+          <tbody>${r.jogadores.map((j) => `<tr><td>${esc(j.perfil.nome)}</td><td>${j.jogou}/${n}</td><td>${j.espera}</td><td>${j.saidas}</td><td>${j.saidasTarde}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </section>
+      <section class="cartao"><h2>Resumo por partida</h2>
+        <div class="rolagem"><table>
+          <thead><tr><th>Data</th><th>Jogadores</th><th>Goleiros</th><th>Espera</th><th>Saídas</th><th>Após 17h</th></tr></thead>
+          <tbody>${r.porPartida.map((p) => `<tr><td>${esc(fmtDiaMes(p.partida.inicio))}</td><td>${p.jogadores}/${dados.config.vagas}</td><td>${p.goleiros}</td><td>${p.espera}</td><td>${p.saidas}</td><td>${p.saidasTarde}</td></tr>`).join('')}</tbody>
+        </table></div>
+        <p class="nota">Os relatórios usam o cadastro atual de cada jogador e contam as saídas registradas desde a ativação do histórico.</p>
+      </section>`;
   }
 
   function telaPagamento() {
@@ -391,6 +530,8 @@
           </div>`;
         }).join('')}
       </section>`;
+    } else if (adminAba === 'relatorios') {
+      corpo = telaRelatorios();
     } else {
       corpo = `<form class="cartao" data-form="config"><h2>Configurações</h2>
         <label>Nome do grupo<input name="nome_grupo" required maxlength="40" value="${esc(config.nome_grupo)}"></label>
@@ -401,7 +542,7 @@
         <button class="primario largo">Salvar</button>
       </form>`;
     }
-    return `<div class="subabas">${sub('pagamentos', 'Pagamentos')}${sub('jogadores', 'Jogadores')}${sub('config', 'Configurações')}</div>${corpo}`;
+    return `<div class="subabas">${sub('pagamentos', 'Pagamentos')}${sub('jogadores', 'Jogadores')}${sub('relatorios', 'Relatórios')}${sub('config', 'Ajustes')}</div>${corpo}`;
   }
 
   function render() {
@@ -416,15 +557,21 @@
     $app.innerHTML = `
       <header class="topo"><img class="logo" src="logo.webp" alt=""><div><h1>${esc(dados.config.nome_grupo)}</h1><small>Olá, ${esc(meu.nome)}</small></div></header>
       ${DEMO ? '<div class="faixa">Modo demonstração: os dados ficam só neste aparelho. <button class="link" data-acao="reiniciar-demo">Recomeçar do zero</button></div>' : ''}
-      ${aba === 'jogo' ? telaJogo() : aba === 'pagamento' ? telaPagamento() : telaAdmin()}
-      <nav class="abas">${botaoAba('jogo', 'Jogo')}${botaoAba('pagamento', 'Pagamento')}${meu.admin ? botaoAba('admin', 'Organizar') : ''}</nav>`;
+      ${aba === 'jogo' ? telaJogo() : aba === 'historico' ? telaHistorico() : aba === 'pagamento' ? telaPagamento() : telaAdmin()}
+      <nav class="abas">${botaoAba('jogo', 'Jogo')}${botaoAba('historico', 'Histórico')}${botaoAba('pagamento', 'Pagamento')}${meu.admin ? botaoAba('admin', 'Organizar') : ''}</nav>`;
   }
 
   // ---------- Ações ----------
 
   const acoes = {
     'aba': (b) => { aba = b.dataset.v; render(); window.scrollTo(0, 0); },
-    'admin-aba': (b) => { adminAba = b.dataset.v; render(); },
+    'admin-aba': async (b) => {
+      adminAba = b.dataset.v;
+      render();
+      if (adminAba !== 'relatorios') return;
+      try { relatorioDados = await api.relatorio(); } catch (e) { aviso(e.message, true); }
+      render();
+    },
     'auth-modo': (b) => { authModo = b.dataset.v; render(); },
     'atualizar': () => executar(async () => {}, 'Lista atualizada.'),
     'confirmar': () => executar(() => api.confirmar(dados.partida.id, dados.eu)),

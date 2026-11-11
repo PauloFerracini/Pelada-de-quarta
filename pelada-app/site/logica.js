@@ -54,7 +54,44 @@
     };
   }
 
-  const api = { alocar, proximaQuarta };
+  /**
+   * Relatório das partidas encerradas: resumo por partida e frequência por jogador.
+   * `saidas` são os registros de quem saiu da lista (partida_id, user_id, criado_em).
+   * Usa o cadastro atual de cada jogador (mensalista/diarista/goleiro).
+   */
+  function relatorio({ partidas, presencas, saidas, perfis, vagas }) {
+    const porJogador = new Map(
+      perfis.map((p) => [p.id, { perfil: p, jogou: 0, espera: 0, saidas: 0, saidasTarde: 0 }])
+    );
+    const porPartida = partidas.map((pt) => {
+      const a = alocar({
+        presencas: presencas.filter((x) => x.partida_id === pt.id),
+        perfis, partida: pt, vagas, agora: new Date(pt.fim),
+      });
+      [...a.jogadores, ...a.goleiros].forEach((i) => porJogador.get(i.user_id).jogou++);
+      a.espera.forEach((i) => porJogador.get(i.user_id).espera++);
+
+      const corte = new Date(pt.prioridade_ate).getTime();
+      const daPartida = saidas.filter((x) => x.partida_id === pt.id);
+      let tarde = 0;
+      daPartida.forEach((x) => {
+        const foiTarde = new Date(x.criado_em).getTime() >= corte;
+        if (foiTarde) tarde++;
+        const j = porJogador.get(x.user_id);
+        if (j) { j.saidas++; if (foiTarde) j.saidasTarde++; }
+      });
+      return {
+        partida: pt, jogadores: a.jogadores.length, goleiros: a.goleiros.length,
+        espera: a.espera.length, saidas: daPartida.length, saidasTarde: tarde,
+      };
+    });
+    const jogadores = [...porJogador.values()]
+      .filter((j) => j.jogou || j.espera || j.saidas)
+      .sort((a, b) => b.jogou - a.jogou || a.perfil.nome.localeCompare(b.perfil.nome, 'pt-BR'));
+    return { porPartida, jogadores };
+  }
+
+  const api = { alocar, proximaQuarta, relatorio };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Logica = api;
 })(typeof window !== 'undefined' ? window : globalThis);
