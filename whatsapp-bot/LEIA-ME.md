@@ -5,6 +5,8 @@ Programa pequeno que roda neste computador e envia os avisos no grupo usando o s
 
 - **Quarta, 10h** — lembrete com o número de confirmados.
 - **Quarta, 17h** — convocação com a lista final.
+- **Todo dia, 9h** — cobrança da mensalidade; só envia nos dias 9, 10, 20 e no último dia do mês,
+  e apenas se houver mensalidade em aberto (tarefa "Pelada - Cobranca").
 
 O computador precisa estar ligado nesses horários. Se estiver desligado às 17h, a convocação sai
 assim que ele for ligado, desde que ainda seja quarta e antes das 22h.

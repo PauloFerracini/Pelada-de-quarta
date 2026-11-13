@@ -7,7 +7,7 @@
 //   node pelada-bot.mjs grupo "nome"        escolhe o grupo que recebe os avisos
 //   node pelada-bot.mjs previa <tipo>       mostra a mensagem sem enviar
 //   node pelada-bot.mjs teste               envia uma mensagem de teste no grupo
-//   node pelada-bot.mjs enviar <tipo>       envia o aviso; <tipo> = lembrete | convocacao
+//   node pelada-bot.mjs enviar <tipo>       envia o aviso; <tipo> = lembrete | convocacao | cobranca
 //                                           (só envia na quarta, no horário certo; --forcar ignora isso)
 
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } from 'baileys';
@@ -45,6 +45,8 @@ export function agoraEmBrasilia(data = new Date()) {
 // Regra de horário: lembrete só na quarta antes das 17h; convocação só na quarta a partir das 17h.
 export function podeEnviar(tipo, data = new Date()) {
   const { diaSemana, hora } = agoraEmBrasilia(data);
+  // A cobrança da mensalidade roda todo dia: é o banco que decide se hoje há aviso (dias 9, 10, 20 e último do mês).
+  if (tipo === 'cobranca') return null;
   if (diaSemana !== 3) return 'hoje não é quarta-feira';
   if (tipo === 'lembrete' && hora >= 17) return 'já passou das 17h (o lembrete perdeu o sentido)';
   if (tipo === 'convocacao' && hora < 17) return 'ainda não são 17h';
@@ -180,7 +182,7 @@ async function principal() {
     await enviarTexto(cfg, 'Teste do app da pelada ✅');
     log(`Mensagem de teste enviada para "${cfg.grupoNome}".`);
   } else if (comando === 'enviar') {
-    if (arg !== 'lembrete' && arg !== 'convocacao') throw new Error('Use: enviar lembrete  ou  enviar convocacao');
+    if (!['lembrete', 'convocacao', 'cobranca'].includes(arg)) throw new Error('Use: enviar lembrete, enviar convocacao ou enviar cobranca');
     const motivo = forcar ? null : podeEnviar(arg);
     if (motivo) return log(`Aviso "${arg}" não enviado: ${motivo}.`);
     const texto = await buscarMensagem(cfg, arg);

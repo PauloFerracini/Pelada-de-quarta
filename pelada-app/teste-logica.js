@@ -99,3 +99,96 @@ console.log('Todos os testes passaram.');
   assert.deepEqual(j, { a: [1, 0, 1, 1], b: [1, 1, 0, 0], c: [1, 0, 0, 0], d: [0, 0, 1, 0] });
   console.log('Relatório: ok.');
 }
+
+// 8. Caixa: reproduz a prestação de contas de outubro de 2026 da pelada.
+{
+  const { caixa } = require('./site/logica.js');
+  const lancamentos = [
+    { id: 1, mes: '2026-09', tipo: 'credito', descricao: 'saldo inicial', valor: 832.83 },
+    { id: 2, mes: '2026-10', tipo: 'credito', descricao: 'multas de mensalidade', valor: 60 },
+    { id: 3, mes: '2026-10', tipo: 'credito', descricao: 'juros do saldo anterior', valor: 4.16 },
+    { id: 4, mes: '2026-10', tipo: 'despesa', descricao: 'Arena Physical - campo', valor: 1900 },
+    { id: 5, mes: '2026-10', tipo: 'despesa', descricao: 'auxílio transporte - goleiros', valor: 45 },
+    { id: 6, mes: '2026-11', tipo: 'despesa', descricao: 'campo', valor: 1900 },
+  ];
+  const pagamentos = [
+    { mes: '2026-10', tipo: 'mensal', quantidade: 30, total: 2100 },
+    { mes: '2026-11', tipo: 'mensal', quantidade: 1, total: 70 },
+  ];
+  const out = caixa({ lancamentos, pagamentos, mes: '2026-10' });
+  assert.equal(out.creditos[0].descricao, 'Mensalidades — 30 jogadores');
+  assert.equal(out.totalCreditos, 2164.16);
+  assert.equal(out.totalDespesas, 1945);
+  assert.equal(out.saldoMes, 219.16);
+  assert.equal(out.saldoAnterior, 832.83);
+  assert.equal(out.caixa, 1051.99);
+  const nov = caixa({ lancamentos, pagamentos, mes: '2026-11' });
+  assert.equal(nov.saldoAnterior, 1051.99);
+  assert.equal(nov.caixa, -778.01);
+  console.log('Caixa: ok.');
+}
+
+// 9. Ranking: ordenação e posições com empate.
+{
+  const { ordenarRanking } = require('./site/logica.js');
+  const linhas = [
+    { nome: 'Ana', jogos: 3, gols: 5, assistencias: 1 },
+    { nome: 'Bia', jogos: 2, gols: 5, assistencias: 4 },
+    { nome: 'Caio', jogos: 3, gols: 7, assistencias: 0 },
+    { nome: 'Davi', jogos: 1, gols: 0, assistencias: 4 },
+  ];
+  assert.deepEqual(ordenarRanking(linhas, 'gols').map((l) => [l.nome, l.posicao]),
+    [['Caio', 1], ['Bia', 2], ['Ana', 2], ['Davi', 4]]);
+  assert.deepEqual(ordenarRanking(linhas, 'assistencias').map((l) => [l.nome, l.posicao]),
+    [['Bia', 1], ['Davi', 1], ['Ana', 3], ['Caio', 4]]);
+  console.log('Ranking: ok.');
+}
+
+// 10. Bloqueio por mensalidade em aberto: só vale depois das 17h e não atinge goleiro.
+{
+  const c = cenario({ mensalistas: 24, diaristas: 2, goleiros: 1 });
+  let r2 = alocar({ ...c, agora: antes, bloqueados: ['m2', 'g1'] });
+  assert.equal(r2.bloqueados.length, 0);
+  assert.equal(r2.jogadores.length, 24);
+  r2 = alocar({ ...c, agora: depois, bloqueados: ['m2', 'g1'] });
+  assert.deepEqual(ids(r2.bloqueados), ['m2']);
+  assert.equal(r2.jogadores.length, 24);
+  assert.ok(!ids(r2.jogadores).includes('m2'));
+  assert.equal(ids(r2.jogadores)[23], 'd1'); // a vaga do bloqueado vai para o primeiro da espera
+  assert.deepEqual(ids(r2.espera), ['d2']);
+  assert.equal(r2.goleiros.length, 1);
+  console.log('Bloqueio: ok.');
+}
+
+// 11. Última pelada do mês, acréscimo da mensalidade e assiduidade.
+{
+  const { ultimaPeladaDoMes, multaMensalidade, assiduidade, caixa, textoPrestacao } = require('./site/logica.js');
+  assert.equal(ultimaPeladaDoMes('2026-11-18'), false);
+  assert.equal(ultimaPeladaDoMes('2026-11-25'), true);
+  assert.equal(ultimaPeladaDoMes('2026-12-30'), true);
+
+  const config = { multa_mensal_apos_10: 5, multa_mensal_apos_20: 10 };
+  assert.equal(multaMensalidade({ mes: '2026-11', hoje: '2026-11-10', config }), 0);
+  assert.equal(multaMensalidade({ mes: '2026-11', hoje: '2026-11-11', config }), 5);
+  assert.equal(multaMensalidade({ mes: '2026-11', hoje: '2026-11-20', config }), 5);
+  assert.equal(multaMensalidade({ mes: '2026-11', hoje: '2026-11-21', config }), 10);
+  assert.equal(multaMensalidade({ mes: '2026-11', hoje: '2026-12-02', config }), 10);
+  assert.equal(multaMensalidade({ mes: '2026-12', hoje: '2026-11-25', config }), 0);
+
+  const partidas = ['2026-10-07', '2026-10-14', '2026-10-21', '2026-10-28', '2026-11-04']
+    .map((data, i) => ({ partida_id: i + 1, data }));
+  const a = assiduidade({ linhas: [{ partida_id: 1 }, { partida_id: 2 }, { partida_id: 4 }, { partida_id: 5 }], partidas, ano: 2026 });
+  assert.deepEqual(a, { partidas: 5, jogos: 4, percentual: 80, sequenciaAtual: 2, maiorSequencia: 2 });
+  assert.equal(assiduidade({ linhas: [], partidas: [], ano: 2026 }).percentual, 0);
+
+  const c = caixa({
+    lancamentos: [{ id: 1, mes: '2026-11', tipo: 'despesa', descricao: 'campo', valor: 1900 }],
+    pagamentos: [{ mes: '2026-11', tipo: 'mensal', quantidade: 30, total: 2100 }, { mes: '2026-11', tipo: 'multa', quantidade: 2, total: 20 }],
+    mes: '2026-11',
+  });
+  assert.equal(c.creditos[1].descricao, 'Multas — 2 pagas');
+  assert.equal(c.caixa, 220);
+  const texto = textoPrestacao({ c, titulo: 'Contas de novembro', fmt: (v) => 'R$' + v });
+  assert.ok(texto.includes('*CAIXA DA PELADA: R$220*') && texto.includes('• campo: R$1900'));
+  console.log('Mensalidade, assiduidade e prestação: ok.');
+}

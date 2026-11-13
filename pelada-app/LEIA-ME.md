@@ -7,6 +7,10 @@ lista de espera dos diaristas, goleiros fixos à parte e controle de pagamentos.
 
 - `site/` — o app (é esta pasta que vai para a internet).
 - `supabase.sql` — cria o banco de dados e as regras de acesso.
+- `financeiro-estatisticas.sql` — rode depois do `historico.sql`: gols e assistências (ranking,
+  perfil e súmula) e o financeiro da pelada (só administradores).
+- `cobranca-multas.sql` — rode por último: multas (com abono), acréscimo da mensalidade em atraso,
+  bloqueio na última pelada do mês, virada do mês e os avisos de cobrança no WhatsApp.
 - `telefone.sql` — rode depois do `supabase.sql`: mostra ao organizador o login de cada jogador
   (número do WhatsApp ou e-mail) e permite redefinir a senha de quem esqueceu.
 - `historico.sql` — rode depois do `supabase.sql`: registra entradas e saídas da lista e as

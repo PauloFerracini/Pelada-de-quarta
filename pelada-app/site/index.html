@@ -88,6 +88,38 @@
   .subabas { display: flex; gap: 8px; margin-bottom: 14px; }
   .subabas button { flex: 1; padding: 8px 4px; min-height: 40px; font-size: 13px; }
   .subabas .ativa { background: var(--verde-claro); color: var(--verde); border-color: transparent; }
+  .subabas.quebra { flex-wrap: wrap; }
+  .subabas.quebra button { flex: 1 1 22%; }
+  .filtros { display: flex; gap: 8px; align-items: stretch; margin-bottom: 14px; }
+  .filtros select { width: auto; min-height: 40px; padding: 4px 10px; }
+  .filtros .subabas { flex: 1; margin-bottom: 0; }
+  td .link { padding: 0; text-align: left; font-weight: 600; }
+  tr.eu td { font-weight: 700; }
+  .numeros { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0; }
+  .numeros div { background: var(--fundo); border-radius: 10px; padding: 12px 6px; text-align: center; }
+  .numeros strong { display: block; font-size: 26px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .numeros span { font-size: 12px; color: var(--suave); }
+  .linha-sumula { display: flex; align-items: flex-end; gap: 8px; padding: 10px 0; border-top: 1px solid var(--linha); }
+  .linha-sumula .nome { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-bottom: 8px; }
+  label.mini { width: 62px; font-size: 12px; }
+  label.mini input { padding: 6px 4px; min-height: 38px; text-align: center; }
+  section.cartao > label, section.cartao > .primario { margin-top: 12px; }
+  table.ranking th:nth-child(2), table.ranking td:nth-child(2) { text-align: left; }
+  table.ranking th:first-child, table.ranking td:first-child { text-align: center; width: 40px; }
+  .mes-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  .mes-nav h2 { margin: 0; text-align: center; flex: 1; display: block; }
+  .faixa-titulo { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--verde);
+    background: var(--verde-claro); border-radius: 8px; padding: 6px 10px; margin: 14px 0 4px; }
+  .valor { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .total-linha, .caixa-final { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0;
+    border-top: 1px solid var(--linha); font-variant-numeric: tabular-nums; }
+  .caixa-final { background: var(--verde-forte); color: var(--sobre-verde); border: 0; border-radius: 10px;
+    padding: 12px; margin-top: 8px; font-size: 18px; text-transform: uppercase; }
+  nav.abas button { padding: 6px 2px; font-size: 14px; }
+  .botoes { display: flex; gap: 8px; margin-top: 12px; }
+  .botoes button { flex: 1; }
+  form .faixa-titulo { margin: 4px 0 0; }
+  form label.marca { color: var(--texto); display: flex; }
   .pix { display: flex; gap: 8px; align-items: center; background: var(--fundo); border-radius: 10px; padding: 10px 12px; margin: 8px 0 4px; }
   .pix code { flex: 1; overflow-wrap: anywhere; font-size: 15px; }
   nav.abas { position: fixed; left: 0; right: 0; bottom: 0; background: var(--cartao); border-top: 1px solid var(--linha);

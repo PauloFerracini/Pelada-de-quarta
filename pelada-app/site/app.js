@@ -48,6 +48,9 @@
   const fmtQuando = (iso) =>
     new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
       .format(new Date(iso)).replace('.,', '').replace(',', '');
+  // Data de hoje (ou de `d`) em Brasília, no formato AAAA-MM-DD.
+  const hojeSP = (d = new Date()) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
   const fmtValor = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
   let avisoTimer;
@@ -81,8 +84,26 @@
       ['Zeca', 'Pingo', 'Mário', 'Tuca', 'Edu'].forEach((nome, i) => add(nome, 'diarista', false, i < 4));
       return {
         usuarios, presencas, pagamentos: [], sessao: null, seq: 1,
-        config: { nome_grupo: 'Pelada de Quarta', vagas: 24, valor_mensal: 80, valor_diaria: 25, chave_pix: '' },
+        config: {
+          nome_grupo: 'Pelada de Quarta', vagas: 24, valor_mensal: 70, valor_diaria: 25, chave_pix: '',
+          multa_mensal_apos_10: 5, multa_mensal_apos_20: 10, multa_falta: 10, multa_saida: 10, rebaixar_automatico: false,
+        },
+        multas: [],
+        // Números fictícios da "partida anterior", só para o ranking da demonstração não nascer vazio.
+        estatisticas: usuarios.slice(0, 24).map((u, i) => ({
+          partida_id: 'anterior', user_id: u.id, gols: i < 12 ? (i * 7) % 4 : 0, assistencias: (i * 5) % 3,
+        })),
+        lancamentos: [],
       };
+    }
+    // A demonstração conhece duas partidas: a da vez e uma "anterior", sete dias antes.
+    function partidasDemo() {
+      const p = Logica.proximaQuarta(new Date());
+      const menos7 = (iso) => new Date(new Date(iso).getTime() - 7 * 24 * 3600 * 1000).toISOString();
+      return [
+        { id: p.data, ...p },
+        { id: 'anterior', data: menos7(p.inicio).slice(0, 10), inicio: menos7(p.inicio), fim: menos7(p.fim), prioridade_ate: menos7(p.prioridade_ate) },
+      ];
     }
     function ler() {
       if (mem) return mem;
@@ -96,6 +117,12 @@
       const eu = d.usuarios.find((u) => u.id === d.sessao);
       if (!eu || !eu.admin) throw new Error('Apenas o administrador pode fazer isso.');
     };
+    // Mensalistas (sem contar goleiros fixos) que não pagaram a mensalidade do mês.
+    const emAberto = (d, mes) => d.usuarios.filter((u) => u.tipo === 'mensalista' && !u.goleiro
+      && !d.pagamentos.some((p) => p.user_id === u.id && p.tipo === 'mensal' && p.mes === mes));
+    // Bloqueio e perda de vaga só valem em mês com ao menos uma mensalidade marcada no app.
+    const mesControlado = (d, mes) => d.pagamentos.some((p) => p.tipo === 'mensal' && p.mes === mes);
+    const devedores = (d, mes) => (mesControlado(d, mes) ? emAberto(d, mes) : []);
     // Mesmo registro que os gatilhos do banco fazem no app publicado.
     const registrar = (d, tipo, partida_id, user_id, detalhe, entrada_em) => {
       const nomeDe = (id) => (d.usuarios.find((u) => u.id === id) || {}).nome || '';
@@ -128,7 +155,144 @@
       },
       async sair() { ler().sessao = null; gravar(); },
       async recuperar() { throw new Error('A recuperação de senha por e-mail só funciona com o app publicado.'); },
-      async novaSenha() {},
+      async novaSenha(senha) {
+        const d = ler();
+        if (senha.length < 6) throw new Error('A senha precisa ter pelo menos 6 caracteres.');
+        const u = d.usuarios.find((x) => x.id === d.sessao);
+        if (u) { u.senha = senha; gravar(); }
+      },
+      async ranking(ano) {
+        const d = ler();
+        const datas = Object.fromEntries(partidasDemo().map((p) => [p.id, p.data]));
+        const porJogador = new Map();
+        (d.estatisticas || []).filter((e) => (datas[e.partida_id] || '').startsWith(String(ano))).forEach((e) => {
+          const r = porJogador.get(e.user_id) || { user_id: e.user_id, jogos: 0, gols: 0, assistencias: 0 };
+          r.jogos++; r.gols += e.gols; r.assistencias += e.assistencias;
+          porJogador.set(e.user_id, r);
+        });
+        return [...porJogador.values()];
+      },
+      async perfilStats(id) {
+        const datas = Object.fromEntries(partidasDemo().map((p) => [p.id, p.data]));
+        return (ler().estatisticas || []).filter((e) => e.user_id === id && datas[e.partida_id])
+          .map((e) => ({ partida_id: e.partida_id, data: datas[e.partida_id], gols: e.gols, assistencias: e.assistencias }));
+      },
+      async sumula(partidaId) {
+        const d = ler();
+        const partidas = partidasDemo().filter((p) => new Date(p.inicio).getTime() <= Date.now());
+        if (!partidas.length) return { partidas, partidaId: null, presencas: [], stats: [] };
+        const id = partidas.some((p) => p.id === partidaId) ? partidaId : partidas[0].id;
+        return {
+          partidas, partidaId: id,
+          presencas: d.presencas.filter((x) => x.partida_id === id),
+          stats: (d.estatisticas || []).filter((e) => e.partida_id === id),
+        };
+      },
+      async salvarSumula(partidaId, linhas) {
+        const d = ler(); exigirAdmin(d);
+        d.estatisticas = (d.estatisticas || []).filter((e) => e.partida_id !== partidaId)
+          .concat(linhas.map((l) => ({ partida_id: partidaId, ...l })));
+        registrar(d, 'estatistica', partidaId, null, `súmula salva: ${linhas.length} jogadores`);
+        // Multa de falta: estava convocado no fim da lista e não entrou na súmula.
+        const pt = partidasDemo().find((p) => p.id === partidaId);
+        const valor = Number(d.config.multa_falta || 0);
+        d.multas = (d.multas || []).filter((m) => !(m.partida_id === partidaId && m.motivo === 'falta' && m.status === 'pendente'
+          && linhas.some((l) => l.user_id === m.user_id)));
+        if (pt && valor > 0 && linhas.length) {
+          const a = Logica.alocar({ presencas: d.presencas.filter((x) => x.partida_id === partidaId), perfis: d.usuarios, partida: pt, vagas: d.config.vagas, agora: new Date(pt.fim) });
+          [...a.jogadores, ...a.goleiros].forEach((i) => {
+            if (linhas.some((l) => l.user_id === i.user_id)) return;
+            if (d.multas.some((m) => m.partida_id === partidaId && m.user_id === i.user_id && m.motivo === 'falta')) return;
+            d.multas.push({ id: d.seq++, user_id: i.user_id, motivo: 'falta', descricao: `Falta sem aviso em ${pt.data.slice(8, 10)}/${pt.data.slice(5, 7)}`,
+              partida_id: partidaId, mes: null, valor, status: 'pendente', justificativa: '', criado_em: new Date().toISOString(), resolvido_em: null });
+          });
+        }
+        gravar();
+      },
+      async financeiro() {
+        const d = ler(); exigirAdmin(d);
+        const datas = Object.fromEntries(partidasDemo().map((p) => [p.id, p.data]));
+        const somas = new Map();
+        const somar = (mes, tipo, valor) => {
+          const chave = mes + '|' + tipo;
+          const s = somas.get(chave) || { mes, tipo, quantidade: 0, total: 0 };
+          s.quantidade++; s.total += Number(valor || 0);
+          somas.set(chave, s);
+        };
+        d.pagamentos.forEach((p) => somar(p.mes || (datas[p.partida_id] || '').slice(0, 7), p.tipo, p.valor));
+        (d.multas || []).filter((m) => m.status === 'paga' && m.resolvido_em)
+          .forEach((m) => somar(hojeSP(new Date(m.resolvido_em)).slice(0, 7), 'multa', m.valor));
+        return { lancamentos: d.lancamentos || [], pagamentos: [...somas.values()] };
+      },
+      async marcarMensalidade(id, mes) {
+        const d = ler(); exigirAdmin(d);
+        d.pagamentos.push({ id: d.seq++, user_id: id, tipo: 'mensal', mes, valor: d.config.valor_mensal });
+        registrar(d, 'pagamento', null, id, `mensalidade de ${mes} marcada como paga`);
+        const extra = Logica.multaMensalidade({ mes, hoje: hojeSP(), config: d.config });
+        if (extra > 0) {
+          d.multas = d.multas || [];
+          d.multas.push({ id: d.seq++, user_id: id, motivo: 'mensalidade', descricao: `Atraso da mensalidade de ${mes}`, partida_id: null, mes,
+            valor: extra, status: 'paga', justificativa: '', criado_em: new Date().toISOString(), resolvido_em: new Date().toISOString() });
+        }
+        gravar();
+      },
+      async desmarcarMensalidade(id, mes) {
+        const d = ler(); exigirAdmin(d);
+        d.pagamentos = d.pagamentos.filter((p) => !(p.user_id === id && p.tipo === 'mensal' && p.mes === mes));
+        d.multas = (d.multas || []).filter((m) => !(m.user_id === id && m.motivo === 'mensalidade' && m.mes === mes));
+        registrar(d, 'pagamento', null, id, `mensalidade de ${mes} desmarcada`);
+        gravar();
+      },
+      async multasAdmin() { const d = ler(); exigirAdmin(d); return [...(d.multas || [])].reverse(); },
+      async salvarMulta(m) {
+        const d = ler(); exigirAdmin(d);
+        d.multas = d.multas || [];
+        d.multas.push({ id: d.seq++, motivo: 'outro', partida_id: null, mes: null, status: 'pendente', justificativa: '',
+          criado_em: new Date().toISOString(), resolvido_em: null, ...m });
+        registrar(d, 'financeiro', null, m.user_id, `multa lançada: ${m.descricao}`);
+        gravar();
+      },
+      async resolverMulta(id, status, justificativa) {
+        const d = ler(); exigirAdmin(d);
+        const m = (d.multas || []).find((x) => x.id === id);
+        Object.assign(m, { status, justificativa: justificativa || '', resolvido_em: status === 'pendente' ? null : new Date().toISOString() });
+        registrar(d, 'financeiro', null, m.user_id, `multa (${m.descricao}): ${status}${justificativa ? ' — ' + justificativa : ''}`);
+        gravar();
+      },
+      async excluirMulta(id) {
+        const d = ler(); exigirAdmin(d);
+        d.multas = (d.multas || []).filter((x) => x.id !== id);
+        gravar();
+      },
+      async inadimplentes(mes) {
+        const d = ler(); exigirAdmin(d);
+        return devedores(d, mes).map((u) => ({ id: u.id, nome: u.nome }));
+      },
+      async rebaixar(mes) {
+        const d = ler(); exigirAdmin(d);
+        const lista = devedores(d, mes);
+        lista.forEach((u) => { u.tipo = 'diarista'; registrar(d, 'perfil', null, u.id, `virou diarista: mensalidade de ${mes} em aberto`); });
+        gravar();
+        return lista.length;
+      },
+      async partidasComSumula() {
+        const com = new Set((ler().estatisticas || []).map((e) => e.partida_id));
+        return partidasDemo().filter((p) => com.has(p.id)).map((p) => ({ partida_id: p.id, data: p.data }));
+      },
+      async salvarLancamento(l) {
+        const d = ler(); exigirAdmin(d);
+        d.lancamentos = d.lancamentos || [];
+        d.lancamentos.push({ id: d.seq++, ...l });
+        registrar(d, 'financeiro', null, null, `${l.tipo === 'credito' ? 'crédito' : 'despesa'} de ${l.mes}: ${l.descricao} lançado`);
+        gravar();
+      },
+      async excluirLancamento(id) {
+        const d = ler(); exigirAdmin(d);
+        const l = (d.lancamentos || []).find((x) => x.id === id);
+        d.lancamentos = (d.lancamentos || []).filter((x) => x.id !== id);
+        if (l) registrar(d, 'financeiro', null, null, `${l.tipo === 'credito' ? 'crédito' : 'despesa'} de ${l.mes}: ${l.descricao} excluído`);
+        gravar();
+      },
       async carregar(uid) {
         const d = ler();
         const p = Logica.proximaQuarta(new Date());
@@ -143,6 +307,8 @@
             .filter((h) => h.partida_id === partida.id && (h.tipo === 'entrou' || h.tipo === 'saiu')).reverse(),
           acoesAdmin: eu && eu.admin ? (d.historico || []).filter((h) => h.por_admin).reverse().slice(0, 80) : [],
           logins: eu && eu.admin ? d.usuarios.map((u) => ({ id: u.id, login: u.email })) : [],
+          bloqueados: Logica.ultimaPeladaDoMes(partida.data) ? devedores(d, partida.data.slice(0, 7)).map((u) => u.id) : [],
+          multas: (d.multas || []).filter((m) => m.status === 'pendente' && ((eu && eu.admin) || m.user_id === uid)),
         };
       },
       async redefinirSenha(id, senha) {
@@ -241,6 +407,9 @@
       ['rate limit', 'Muitas tentativas. Aguarde alguns minutos e tente de novo.'],
       ['row-level security', 'Você não tem permissão para fazer isso.'],
       ['Failed to fetch', 'Sem conexão. Verifique sua internet.'],
+      ['Could not find the', 'Esta parte ainda não foi ativada no banco de dados (falta rodar o arquivo SQL mais recente).'],
+      ['does not exist', 'Esta parte ainda não foi ativada no banco de dados (falta rodar o arquivo SQL mais recente).'],
+      ['New password should be different', 'A nova senha precisa ser diferente da atual.'],
     ];
     const ok = ({ data, error }) => {
       if (error) {
@@ -290,7 +459,14 @@
           const r = await sb.rpc('admin_logins');
           if (!r.error) logins = r.data;
         }
+        // Bloqueio por mensalidade e multas pendentes; dependem do cobranca-multas.sql.
+        const [bl, mu] = await Promise.all([
+          sb.rpc('bloqueados_partida', { p_partida: partida.id }),
+          sb.from('multas').select('*').eq('status', 'pendente').order('id', { ascending: false }),
+        ]);
         return {
+          bloqueados: bl.error ? [] : bl.data,
+          multas: mu.error ? [] : mu.data,
           eu: uid, partida, perfis, presencas, config, pagamentos, logins,
           movimentos: mov.error ? null : mov.data,
           acoesAdmin: adm.error ? [] : adm.data,
@@ -318,6 +494,56 @@
       async marcarPago(p) { ok(await sb.from('pagamentos').insert(p)); },
       async desmarcarPago(id) { ok(await sb.from('pagamentos').delete().eq('id', id)); },
       async salvarConfig(campos) { ok(await sb.from('config').update(campos).eq('id', 1)); },
+      async ranking(ano) { return ok(await sb.rpc('ranking_ano', { p_ano: ano })); },
+      async perfilStats(id) {
+        const linhas = ok(await sb.from('estatisticas').select('partida_id,gols,assistencias,partidas(data)').eq('user_id', id));
+        return linhas.map((l) => ({ partida_id: l.partida_id, data: l.partidas.data, gols: l.gols, assistencias: l.assistencias }));
+      },
+      async sumula(partidaId) {
+        const partidas = ok(await sb.from('partidas').select('*').lte('inicio', new Date().toISOString())
+          .order('data', { ascending: false }).limit(8));
+        if (!partidas.length) return { partidas, partidaId: null, presencas: [], stats: [] };
+        const escolhida = partidas.find((p) => String(p.id) === String(partidaId)) || partidas[0];
+        const [presencas, stats] = (await Promise.all([
+          sb.from('presencas').select('*').eq('partida_id', escolhida.id),
+          sb.from('estatisticas').select('*').eq('partida_id', escolhida.id),
+        ])).map(ok);
+        return { partidas, partidaId: escolhida.id, presencas, stats };
+      },
+      async salvarSumula(partidaId, linhas) { ok(await sb.rpc('salvar_sumula', { p_partida: partidaId, p_linhas: linhas })); },
+      // Mensalidade com acréscimo por atraso. Se o cobranca-multas.sql ainda não foi rodado, marca do jeito antigo.
+      async marcarMensalidade(id, mes, valorBase) {
+        const r = await sb.rpc('marcar_mensalidade', { p_user: id, p_mes: mes });
+        if (r.error && r.error.message.includes('Could not find'))
+          return ok(await sb.from('pagamentos').insert({ user_id: id, tipo: 'mensal', mes, valor: valorBase }));
+        ok(r);
+      },
+      async desmarcarMensalidade(id, mes) {
+        const r = await sb.rpc('desmarcar_mensalidade', { p_user: id, p_mes: mes });
+        if (r.error && r.error.message.includes('Could not find'))
+          return ok(await sb.from('pagamentos').delete().eq('user_id', id).eq('tipo', 'mensal').eq('mes', mes));
+        ok(r);
+      },
+      async multasAdmin() { return ok(await sb.from('multas').select('*').order('id', { ascending: false }).limit(200)); },
+      async salvarMulta(m) { ok(await sb.from('multas').insert({ ...m, motivo: 'outro' })); },
+      async resolverMulta(id, status, justificativa) {
+        ok(await sb.from('multas').update({
+          status, justificativa: justificativa || '', resolvido_em: status === 'pendente' ? null : new Date().toISOString(),
+        }).eq('id', id));
+      },
+      async excluirMulta(id) { ok(await sb.from('multas').delete().eq('id', id)); },
+      async inadimplentes(mes) { return ok(await sb.rpc('inadimplentes', { p_mes: mes })); },
+      async rebaixar(mes) { return ok(await sb.rpc('rebaixar_inadimplentes', { p_mes: mes })); },
+      async partidasComSumula() { return ok(await sb.rpc('partidas_com_sumula')); },
+      async financeiro() {
+        const [lancamentos, pagamentos] = (await Promise.all([
+          sb.from('lancamentos').select('*').order('id'),
+          sb.rpc('financeiro_pagamentos'),
+        ])).map(ok);
+        return { lancamentos, pagamentos };
+      },
+      async salvarLancamento(l) { ok(await sb.from('lancamentos').insert(l)); },
+      async excluirLancamento(id) { ok(await sb.from('lancamentos').delete().eq('id', id)); },
     };
   }
 
@@ -325,9 +551,63 @@
 
   let api = null;
   let dados = null;          // null = deslogado
-  let aba = 'jogo';          // jogo | historico | pagamento | admin
-  let adminAba = 'pagamentos'; // pagamentos | jogadores | relatorios | config
+  let aba = 'jogo';          // jogo | ranking | pagamento | perfil | admin
+  let adminAba = 'pagamentos'; // pagamentos | jogadores | sumula | financeiro | historico | relatorios | config
   let relatorioDados = null; // carregado ao abrir Organizar > Relatórios
+
+  // Dados carregados só quando a tela correspondente é aberta.
+  const anoAtual = () => Number(new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric' }).format(new Date()));
+  const mesAtual = () => new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
+  let rankingAno = anoAtual();
+  let rankingOrdem = 'gols';     // gols | assistencias
+  const rankings = {};           // ano -> linhas do ranking
+  let perfilId = null;           // jogador mostrado na aba Perfil (null = eu)
+  let perfilLinhas = null;       // partidas do jogador mostrado
+  let sumula = null;             // { partidas, partidaId, presencas, stats }
+  let sumulaValores = {};        // user_id -> { gols, assistencias } enquanto o administrador digita
+  let financeiro = null;         // { lancamentos, pagamentos }
+  let financeiroMes = mesAtual();
+  let partidasSumula = [];       // partidas com súmula, para a assiduidade do perfil
+  let multasAdmin = null;        // todas as multas, para Organizar > Multas
+  let inadimplentesAnterior = []; // mensalistas que não pagaram o mês anterior
+  const somaMes = (mes, n) => {
+    const d = new Date(Date.UTC(Number(mes.slice(0, 4)), Number(mes.slice(5, 7)) - 1 + n, 1));
+    return d.toISOString().slice(0, 7);
+  };
+
+  async function carregarTela(fn) {
+    try { await fn(); } catch (e) { aviso(e.message, true); }
+    render();
+  }
+  const carregarRanking = (ano) => carregarTela(async () => { rankings[ano] = await api.ranking(ano); });
+  const carregarPerfil = () => carregarTela(async () => {
+    perfilLinhas = null;
+    const id = perfilId || dados.eu;
+    const [linhas, rank, comSumula] = await Promise.all([
+      api.perfilStats(id), api.ranking(anoAtual()),
+      api.partidasComSumula().catch(() => []), // depende do cobranca-multas.sql
+    ]);
+    rankings[anoAtual()] = rank;
+    partidasSumula = comSumula;
+    perfilLinhas = linhas;
+  });
+  const carregarMultas = () => carregarTela(async () => { multasAdmin = await api.multasAdmin(); });
+  const mesAnterior = () => somaMes(mesAtual(), -1);
+  const carregarInadimplentes = () => carregarTela(async () => {
+    inadimplentesAnterior = await api.inadimplentes(mesAnterior()).catch(() => []);
+  });
+  const carregarSumula = (partidaId) => carregarTela(async () => {
+    sumula = await api.sumula(partidaId);
+    sumulaValores = {};
+    sumula.stats.forEach((s) => { sumulaValores[s.user_id] = { gols: s.gols, assistencias: s.assistencias }; });
+    if (sumula.partidaId !== null && !sumula.stats.length) {
+      // Primeira vez nesta partida: começa com quem jogou, tudo zerado.
+      const pt = sumula.partidas.find((p) => p.id === sumula.partidaId);
+      const a = Logica.alocar({ presencas: sumula.presencas, perfis: dados.perfis, partida: pt, vagas: dados.config.vagas, agora: new Date(pt.fim) });
+      [...a.jogadores, ...a.goleiros].forEach((i) => { sumulaValores[i.user_id] = { gols: 0, assistencias: 0 }; });
+    }
+  });
+  const carregarFinanceiro = () => carregarTela(async () => { financeiro = await api.financeiro(); });
   let authModo = 'entrar';   // entrar | cadastrar | esqueci
   let recuperando = false;
   let ocupado = false;
@@ -338,7 +618,7 @@
   const pagoMensal = (id) => dados.pagamentos.find((p) => p.tipo === 'mensal' && p.user_id === id && p.mes === mesDaPartida());
   const pagoPartida = (id) => dados.pagamentos.find((p) => p.tipo === 'partida' && p.user_id === id && p.partida_id === dados.partida.id);
   const alocacao = () =>
-    Logica.alocar({ presencas: dados.presencas, perfis: dados.perfis, partida: dados.partida, vagas: dados.config.vagas, agora: new Date() });
+    Logica.alocar({ presencas: dados.presencas, perfis: dados.perfis, partida: dados.partida, vagas: dados.config.vagas, agora: new Date(), bloqueados: dados.bloqueados });
 
   async function recarregar(silencioso) {
     try {
@@ -428,6 +708,7 @@
 
     let status;
     if (!minha) status = 'Você ainda não confirmou presença.';
+    else if (pos(a.bloqueados)) status = 'Você está fora desta partida: sua mensalidade está em aberto.';
     else if (pos(a.goleiros)) status = 'Presença confirmada como goleiro.';
     else if (pos(a.jogadores)) status = `Você está dentro! Vaga ${pos(a.jogadores)} de ${config.vagas}.`;
     else if (!a.passouCorte && meu.tipo === 'diarista')
@@ -449,9 +730,12 @@
           : `<button class="primario largo" data-acao="confirmar">${meu.tipo === 'diarista' && !meu.goleiro && !a.passouCorte ? 'Entrar na lista de espera' : 'Confirmar presença'}</button>`}
       </section>
       <p class="faixa">${regra}</p>
+      ${!a.passouCorte && dados.bloqueados.includes(dados.eu)
+        ? `<p class="faixa">Esta é a última pelada do mês e sua mensalidade está em aberto. Pague até as ${corte} para poder jogar.</p>` : ''}
       ${secaoLista(a.passouCorte ? 'Jogadores' : 'Mensalistas confirmados', `${a.jogadores.length}/${config.vagas}`, a.jogadores, 'Ninguém confirmou ainda.', meu.admin)}
       ${secaoLista('Goleiros', a.goleiros.length, a.goleiros, 'Nenhum goleiro confirmou ainda.', meu.admin)}
       ${secaoLista('Lista de espera', a.espera.length, a.espera, 'Ninguém na espera.', meu.admin)}
+      ${a.bloqueados.length ? secaoLista('Fora por mensalidade em aberto', a.bloqueados.length, a.bloqueados, '', meu.admin) : ''}
       <button class="link" data-acao="atualizar">Atualizar lista</button>`;
   }
 
@@ -467,7 +751,7 @@
     const linhaAdm = (h) => {
       const oQue = h.tipo === 'entrou' ? `pôs ${esc(h.nome)} na lista`
         : h.tipo === 'saiu' ? `tirou ${esc(h.nome)} da lista`
-        : h.tipo === 'config' ? esc(h.detalhe)
+        : h.tipo === 'config' || !h.nome ? esc(h.detalhe)
         : `${esc(h.nome)}: ${esc(h.detalhe)}`;
       return `<li><span class="nome">${esc(h.autor_nome || 'Sistema')} — ${oQue}
         <small class="quando">${esc(fmtQuando(h.criado_em))}</small></span></li>`;
@@ -508,14 +792,215 @@
       </section>`;
   }
 
+  const fmtDataCurta = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}`;
+  const carregandoCartao = '<section class="cartao"><p class="vazio">Carregando…</p></section>';
+  // Ranking de um ano com nome e posição; ignora quem não tem mais cadastro.
+  function rankingOrdenado(ano, criterio) {
+    const linhas = (rankings[ano] || []).map((l) => ({ ...l, nome: (perfilDe(l.user_id) || {}).nome }))
+      .filter((l) => l.nome);
+    return Logica.ordenarRanking(linhas, criterio);
+  }
+
+  function telaRanking() {
+    const anos = [anoAtual(), anoAtual() - 1, anoAtual() - 2];
+    const ordem = (v, t) => `<button class="${rankingOrdem === v ? 'ativa' : ''}" data-acao="ranking-ordem" data-v="${v}">${t}</button>`;
+    const filtros = `<div class="filtros">
+      <select data-mudar="ranking-ano" aria-label="Ano do ranking">${anos.map((a) => `<option value="${a}" ${a === rankingAno ? 'selected' : ''}>${a}</option>`).join('')}</select>
+      <div class="subabas">${ordem('gols', 'Artilharia')}${ordem('assistencias', 'Assistências')}</div>
+    </div>`;
+    if (!rankings[rankingAno]) return filtros + carregandoCartao;
+    const linhas = rankingOrdenado(rankingAno, rankingOrdem);
+    return `${filtros}
+      <section class="cartao"><h2>${rankingOrdem === 'gols' ? 'Artilharia' : 'Assistências'} de ${rankingAno}<span>${linhas.length} ${linhas.length === 1 ? 'jogador' : 'jogadores'}</span></h2>
+        ${linhas.length ? `<div class="rolagem"><table class="ranking">
+          <thead><tr><th>#</th><th>Jogador</th><th>Jogos</th><th>Gols</th><th>Assist.</th></tr></thead>
+          <tbody>${linhas.map((l) => `<tr class="${l.user_id === dados.eu ? 'eu' : ''}">
+            <td>${l.posicao}º</td>
+            <td><button class="link" data-acao="ver-perfil" data-id="${esc(l.user_id)}">${esc(l.nome)}</button></td>
+            <td>${l.jogos}</td><td>${l.gols}</td><td>${l.assistencias}</td></tr>`).join('')}</tbody>
+        </table></div>
+        <p class="nota">Toque em um nome para ver o perfil do jogador.</p>`
+        : '<p class="vazio">Ainda não há estatísticas lançadas neste ano.</p>'}
+      </section>`;
+  }
+
+  function telaPerfil() {
+    const id = perfilId || dados.eu;
+    const p = perfilDe(id);
+    const proprio = id === dados.eu;
+    if (!p) return '<section class="cartao"><p class="vazio">Jogador não encontrado.</p></section>';
+    const voltar = proprio ? '' : '<button class="link" data-acao="meu-perfil">← Voltar ao meu perfil</button>';
+    const cabecalho = `<section class="cartao"><h2>${esc(p.nome)}${proprio ? ' (você)' : ''}<span>${p.tipo === 'mensalista' ? 'Mensalista' : 'Diarista'}${p.goleiro ? ' · Goleiro fixo' : ''}</span></h2>`;
+    const conta = proprio ? `<section class="cartao"><h2>Minha conta</h2>
+        <button class="link" data-acao="trocar-senha">Trocar minha senha</button><br>
+        <button class="link" data-acao="sair">Sair da conta</button>
+      </section>` : '';
+    if (!perfilLinhas) return `${voltar}${cabecalho}<p class="vazio">Carregando…</p></section>${conta}`;
+
+    const ano = anoAtual();
+    const soma = (linhas) => ({
+      jogos: linhas.length,
+      gols: linhas.reduce((t, l) => t + l.gols, 0),
+      assistencias: linhas.reduce((t, l) => t + l.assistencias, 0),
+    });
+    const temporada = soma(perfilLinhas.filter((l) => l.data.startsWith(String(ano))));
+    const carreira = soma(perfilLinhas);
+    const posicao = (criterio) => (rankingOrdenado(ano, criterio).find((l) => l.user_id === id) || {}).posicao;
+    const numeros = (n) => `<div class="numeros">
+      <div><strong>${n.jogos}</strong><span>Jogos</span></div>
+      <div><strong>${n.gols}</strong><span>Gols</span></div>
+      <div><strong>${n.assistencias}</strong><span>Assistências</span></div></div>`;
+    const ultimas = [...perfilLinhas].sort((a, b) => b.data.localeCompare(a.data)).slice(0, 10);
+    return `${voltar}
+      ${cabecalho}
+        <p class="nota">Temporada ${ano}</p>
+        ${numeros(temporada)}
+        ${temporada.jogos ? `<p class="nota">No ranking de ${ano}: ${posicao('gols')}º em gols e ${posicao('assistencias')}º em assistências.</p>` : ''}
+      </section>
+      ${(() => {
+        const as = Logica.assiduidade({ linhas: perfilLinhas, partidas: partidasSumula, ano });
+        if (!as.partidas) return '';
+        return `<section class="cartao"><h2>Assiduidade<span>${ano}</span></h2>
+          <div class="numeros">
+            <div><strong>${as.percentual}%</strong><span>Presença</span></div>
+            <div><strong>${as.sequenciaAtual}</strong><span>Jogos seguidos</span></div>
+            <div><strong>${as.maiorSequencia}</strong><span>Maior sequência</span></div>
+          </div>
+          <p class="nota">Jogou ${as.jogos} de ${as.partidas} ${as.partidas === 1 ? 'partida' : 'partidas'} com súmula lançada no ano.</p>
+        </section>`;
+      })()}
+      <section class="cartao"><h2>Carreira<span>desde o início do app</span></h2>${numeros(carreira)}</section>
+      <section class="cartao"><h2>Últimas partidas</h2>
+        ${ultimas.length ? `<div class="rolagem"><table>
+          <thead><tr><th>Data</th><th>Gols</th><th>Assistências</th></tr></thead>
+          <tbody>${ultimas.map((l) => `<tr><td>${esc(fmtDataCurta(l.data))}</td><td>${l.gols}</td><td>${l.assistencias}</td></tr>`).join('')}</tbody>
+        </table></div>` : '<p class="vazio">Nenhuma partida com estatísticas lançadas.</p>'}
+      </section>
+      ${conta}`;
+  }
+
+  function telaSumula() {
+    if (!sumula) return carregandoCartao;
+    if (sumula.partidaId === null)
+      return '<section class="cartao"><h2>Súmula</h2><p class="vazio">Ainda não há partida iniciada. A súmula é liberada quando o jogo começa.</p></section>';
+    const jogadores = Object.keys(sumulaValores).map(perfilDe).filter(Boolean)
+      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    const fora = dados.perfis.filter((p) => !sumulaValores[p.id]);
+    const campo = (id, nome, rotulo) => `<label class="mini">${rotulo}
+      <input type="number" inputmode="numeric" min="0" max="99" data-sumula="${esc(id)}" data-campo="${nome}" value="${sumulaValores[id][nome]}"></label>`;
+    return `
+      <section class="cartao"><h2>Súmula<span>gols e assistências</span></h2>
+        <label>Partida
+          <select data-mudar="sumula-partida">${sumula.partidas.map((pt) =>
+            `<option value="${esc(pt.id)}" ${pt.id === sumula.partidaId ? 'selected' : ''}>${esc(fmtDataCurta(pt.data))}</option>`).join('')}</select>
+        </label>
+        <p class="nota">${sumula.stats.length ? 'Esta partida já tem súmula salva; alterar e salvar substitui os números.' : 'Lista inicial: quem estava convocado. Tire quem faltou e acrescente quem jogou.'}</p>
+        ${jogadores.length ? jogadores.map((p) => `<div class="linha-sumula">
+          <span class="nome">${esc(p.nome)}</span>
+          ${campo(p.id, 'gols', 'Gols')}${campo(p.id, 'assistencias', 'Assist.')}
+          <button class="pequeno" data-acao="sumula-tirar" data-id="${esc(p.id)}" aria-label="Tirar ${esc(p.nome)} da súmula">Tirar</button>
+        </div>`).join('') : '<p class="vazio">Nenhum jogador na súmula.</p>'}
+        ${fora.length ? `<label>Acrescentar jogador
+          <select data-mudar="sumula-add"><option value="">Escolha…</option>${fora.map((p) => `<option value="${esc(p.id)}">${esc(p.nome)}</option>`).join('')}</select>
+        </label>` : ''}
+        <button class="primario largo" data-acao="salvar-sumula">Salvar súmula</button>
+      </section>`;
+  }
+
+  function telaMultas() {
+    if (!multasAdmin) return carregandoCartao;
+    const nome = (id) => (perfilDe(id) || {}).nome || 'Jogador removido';
+    const pendentes = multasAdmin.filter((m) => m.status === 'pendente');
+    const resolvidas = multasAdmin.filter((m) => m.status !== 'pendente').slice(0, 30);
+    const linha = (m) => `<div class="linha-admin">
+      <strong>${esc(nome(m.user_id))}<small class="quando">${esc(m.descricao)} · ${fmtValor(m.valor)}${m.status === 'abonada' && m.justificativa ? ` · abonada: ${esc(m.justificativa)}` : ''}</small></strong>
+      <span class="etiqueta ${m.status === 'paga' ? 'ok' : m.status === 'abonada' ? 'cinza' : 'pendente'}">${{ pendente: 'Pendente', paga: 'Paga', abonada: 'Abonada' }[m.status]}</span>
+      <div class="opcoes">
+        ${m.status === 'pendente'
+          ? `<button class="pequeno" data-acao="multa-pagar" data-id="${esc(m.id)}">Marcar paga</button>
+             <button class="pequeno" data-acao="multa-abonar" data-id="${esc(m.id)}">Abonar</button>
+             <button class="pequeno" data-acao="multa-excluir" data-id="${esc(m.id)}">Excluir</button>`
+          : m.motivo === 'mensalidade' ? ''
+          : `<button class="pequeno" data-acao="multa-reabrir" data-id="${esc(m.id)}">Voltar a pendente</button>`}
+      </div>
+    </div>`;
+    return `
+      <section class="cartao"><h2>Multas pendentes<span>${pendentes.length}</span></h2>
+        <p class="nota">Falta justificada? Use "Abonar" e escreva o motivo: a multa deixa de ser cobrada e o motivo fica registrado.</p>
+        ${pendentes.length ? pendentes.map(linha).join('') : '<p class="vazio">Nenhuma multa pendente.</p>'}
+      </section>
+      <form class="cartao" data-form="multa"><h2>Nova multa</h2>
+        <label>Jogador
+          <select name="user_id" required><option value="">Escolha…</option>${dados.perfis.map((p) => `<option value="${esc(p.id)}">${esc(p.nome)}</option>`).join('')}</select>
+        </label>
+        <label>Motivo<input name="descricao" required maxlength="80" placeholder="Ex.: falta sem aviso em 11/11"></label>
+        <label>Valor (R$)<input name="valor" type="number" min="0" step="0.01" required inputmode="decimal"></label>
+        <button class="primario largo">Lançar multa</button>
+      </form>
+      <section class="cartao"><h2>Multas resolvidas<span>${resolvidas.length}</span></h2>
+        ${resolvidas.length ? resolvidas.map(linha).join('') : '<p class="vazio">Nenhuma multa paga ou abonada ainda.</p>'}
+      </section>`;
+  }
+
+  // Prestação de contas do mês aberto no Financeiro, em texto para o WhatsApp.
+  const textoDasContas = () => Logica.textoPrestacao({
+    c: Logica.caixa({ ...financeiro, mes: financeiroMes }),
+    titulo: `${dados.config.nome_grupo} — contas de ${fmtMes(financeiroMes)}`,
+    fmt: fmtValor,
+  });
+
+  function telaFinanceiro() {
+    if (!financeiro) return carregandoCartao;
+    const c = Logica.caixa({ ...financeiro, mes: financeiroMes });
+    const linha = (l) => `<li><span class="nome">${esc(l.descricao)}${l.auto ? '<small class="quando">automático: pagamentos marcados no app</small>' : ''}</span>
+      <span class="valor">${fmtValor(l.valor)}</span>
+      ${l.auto ? '' : `<button class="pequeno" data-acao="fin-excluir" data-id="${esc(l.id)}" aria-label="Excluir ${esc(l.descricao)}">Excluir</button>`}</li>`;
+    const bloco = (titulo, itens, total, vazio) => `
+      <h3 class="faixa-titulo">${titulo}</h3>
+      ${itens.length ? `<ul class="lista sem-numero">${itens.map(linha).join('')}</ul>` : `<p class="vazio">${vazio}</p>`}
+      <p class="total-linha"><span>Total</span><strong>${fmtValor(total)}</strong></p>`;
+    return `
+      <section class="cartao">
+        <div class="mes-nav">
+          <button class="pequeno" data-acao="fin-mes" data-v="-1" aria-label="Mês anterior">◀</button>
+          <h2>Contas de ${esc(fmtMes(financeiroMes))}</h2>
+          <button class="pequeno" data-acao="fin-mes" data-v="1" aria-label="Próximo mês">▶</button>
+        </div>
+        ${bloco('Créditos', c.creditos, c.totalCreditos, 'Nenhum crédito neste mês.')}
+        ${bloco('Despesas', c.despesas, c.totalDespesas, 'Nenhuma despesa neste mês.')}
+        <p class="total-linha"><span>Saldo do mês</span><strong>${fmtValor(c.saldoMes)}</strong></p>
+        <p class="total-linha"><span>Saldo anterior</span><strong>${fmtValor(c.saldoAnterior)}</strong></p>
+        <p class="caixa-final"><span>Caixa da pelada</span><strong>${fmtValor(c.caixa)}</strong></p>
+        <div class="botoes">
+          <button class="primario" data-acao="fin-whatsapp">Enviar no WhatsApp</button>
+          <button data-acao="fin-copiar">Copiar texto</button>
+        </div>
+        <p class="nota">"Enviar no WhatsApp" abre o WhatsApp com a prestação de contas pronta; você escolhe o grupo e envia.</p>
+      </section>
+      <form class="cartao" data-form="lancamento"><h2>Novo lançamento<span>${esc(fmtMes(financeiroMes))}</span></h2>
+        <label>Tipo
+          <select name="tipo"><option value="despesa">Despesa</option><option value="credito">Crédito</option></select>
+        </label>
+        <label>Descrição<input name="descricao" required maxlength="80" placeholder="Ex.: aluguel do campo"></label>
+        <label>Valor (R$)<input name="valor" type="number" min="0" step="0.01" required inputmode="decimal"></label>
+        <button class="primario largo">Lançar</button>
+        <p class="nota">Mensalidades e diárias marcadas como pagas entram sozinhas nos créditos. Para começar com o caixa que a pelada já tem, lance um crédito "saldo inicial" no mês anterior.</p>
+      </form>`;
+  }
+
   function telaPagamento() {
     const { config, partida } = dados;
     const meu = eu();
     const a = alocacao();
     let situacao;
     if (meu.tipo === 'mensalista') {
-      situacao = `<p>Mensalidade de ${esc(fmtMes(mesDaPartida()))}: <strong>${fmtValor(config.valor_mensal)}</strong></p>
-        <p><span class="etiqueta ${pagoMensal(meu.id) ? 'ok' : 'pendente'}">${pagoMensal(meu.id) ? 'Paga' : 'Pendente'}</span></p>`;
+      const pago = pagoMensal(meu.id);
+      const extra = pago ? 0 : Logica.multaMensalidade({ mes: mesDaPartida(), hoje: hojeSP(), config });
+      situacao = `<p>Mensalidade de ${esc(fmtMes(mesDaPartida()))}: <strong>${fmtValor(Number(config.valor_mensal) + extra)}</strong></p>
+        <p><span class="etiqueta ${pago ? 'ok' : 'pendente'}">${pago ? 'Paga' : extra ? 'Em atraso' : 'Pendente'}</span></p>
+        ${pago ? '' : extra
+          ? `<p class="nota">${fmtValor(config.valor_mensal)} da mensalidade mais ${fmtValor(extra)} de multa por atraso.</p>`
+          : '<p class="nota">Vence no dia 10. Depois disso há multa por atraso.</p>'}`;
     } else {
       const joga = a.passouCorte && [...a.jogadores, ...a.goleiros].some((i) => i.user_id === meu.id);
       situacao = `<p>Diária por partida: <strong>${fmtValor(config.valor_diaria)}</strong></p>
@@ -525,15 +1010,19 @@
     }
     return `
       <section class="cartao"><h2>Minha situação<span>${meu.tipo === 'mensalista' ? 'Mensalista' : 'Diarista'}</span></h2>${situacao}</section>
+      ${(() => {
+        const minhas = dados.multas.filter((m) => m.user_id === meu.id);
+        if (!minhas.length) return '';
+        return `<section class="cartao"><h2>Minhas multas pendentes<span>${fmtValor(minhas.reduce((t, m) => t + Number(m.valor), 0))}</span></h2>
+          <ul class="lista sem-numero">${minhas.map((m) => `<li><span class="nome">${esc(m.descricao)}</span><span class="valor">${fmtValor(m.valor)}</span></li>`).join('')}</ul>
+          <p class="nota">Teve um motivo para a falta? Fale com o organizador: multas justificadas podem ser abonadas.</p>
+        </section>`;
+      })()}
       <section class="cartao"><h2>Como pagar</h2>
         ${config.chave_pix
           ? `<p class="nota">Faça um Pix para a chave abaixo. O organizador marca o pagamento aqui depois de conferir.</p>
              <div class="pix"><code>${esc(config.chave_pix)}</code><button class="pequeno" data-acao="copiar-pix">Copiar</button></div>`
           : '<p class="vazio">O organizador ainda não cadastrou a chave Pix.</p>'}
-      </section>
-      <section class="cartao"><h2>Minha conta</h2>
-        <p class="nota">${esc(meu.nome)}</p>
-        <button class="link" data-acao="sair">Sair da conta</button>
       </section>`;
   }
 
@@ -550,7 +1039,14 @@
       const mensalistas = perfis.filter((p) => p.tipo === 'mensalista');
       const diaristas = (a.passouCorte ? [...a.jogadores, ...a.goleiros] : []).map((i) => i.perfil).filter((p) => p.tipo === 'diarista');
       const pagos = mensalistas.filter((p) => pagoMensal(p.id)).length;
+      const extraHoje = Logica.multaMensalidade({ mes: mesDaPartida(), hoje: hojeSP(), config });
       corpo = `
+        ${inadimplentesAnterior.length ? `<section class="cartao"><h2>Mensalidade de ${esc(fmtMes(mesAnterior()))} em aberto<span>${inadimplentesAnterior.length}</span></h2>
+          <p class="nota">${inadimplentesAnterior.map((p) => esc(p.nome)).join(', ')}.</p>
+          <p class="nota">Pela regra da pelada, quem vira o mês sem pagar perde a vaga fixa.</p>
+          <button class="largo" data-acao="rebaixar">Transformar em diaristas</button>
+        </section>` : ''}
+        ${extraHoje ? `<p class="faixa">Mensalidade em atraso: quem for marcado como pago hoje paga ${fmtValor(Number(config.valor_mensal) + extraHoje)} (${fmtValor(extraHoje)} de multa, lançada automaticamente).</p>` : ''}
         <section class="cartao"><h2>Mensalidades de ${esc(fmtMes(mesDaPartida()))}<span>${pagos}/${mensalistas.length} pagas</span></h2>
           ${mensalistas.length ? `<ol class="lista">${mensalistas.map((p) => linha(p, pagoMensal(p.id), 'pago-mensal')).join('')}</ol>` : '<p class="vazio">Nenhum mensalista cadastrado.</p>'}
         </section>
@@ -580,6 +1076,14 @@
       </section>`;
     } else if (adminAba === 'relatorios') {
       corpo = telaRelatorios();
+    } else if (adminAba === 'multas') {
+      corpo = telaMultas();
+    } else if (adminAba === 'sumula') {
+      corpo = telaSumula();
+    } else if (adminAba === 'financeiro') {
+      corpo = telaFinanceiro();
+    } else if (adminAba === 'historico') {
+      corpo = telaHistorico();
     } else {
       corpo = `<form class="cartao" data-form="config"><h2>Configurações</h2>
         <label>Nome do grupo<input name="nome_grupo" required maxlength="40" value="${esc(config.nome_grupo)}"></label>
@@ -587,10 +1091,18 @@
         <label>Valor da mensalidade (R$)<input name="valor_mensal" type="number" min="0" step="0.01" required value="${esc(config.valor_mensal)}"></label>
         <label>Valor da diária (R$)<input name="valor_diaria" type="number" min="0" step="0.01" required value="${esc(config.valor_diaria)}"></label>
         <label>Chave Pix<input name="chave_pix" maxlength="120" value="${esc(config.chave_pix)}"></label>
+        ${config.multa_mensal_apos_10 === undefined ? '' : `
+        <h3 class="faixa-titulo">Mensalidade em atraso (vence dia 10)</h3>
+        <label>Multa do dia 11 ao dia 20 (R$)<input name="multa_mensal_apos_10" type="number" min="0" step="0.01" required value="${esc(config.multa_mensal_apos_10)}"></label>
+        <label>Multa depois do dia 20 (R$)<input name="multa_mensal_apos_20" type="number" min="0" step="0.01" required value="${esc(config.multa_mensal_apos_20)}"></label>
+        <label class="marca"><input type="checkbox" name="rebaixar_automatico" ${config.rebaixar_automatico ? 'checked' : ''}>Na virada do mês, transformar automaticamente em diarista quem não pagou</label>
+        <h3 class="faixa-titulo">Multas de presença (0 = desligada)</h3>
+        <label>Falta sem tirar o nome da lista (R$)<input name="multa_falta" type="number" min="0" step="0.01" required value="${esc(config.multa_falta)}"></label>
+        <label>Saída da lista depois das 17h (R$)<input name="multa_saida" type="number" min="0" step="0.01" required value="${esc(config.multa_saida)}"></label>`}
         <button class="primario largo">Salvar</button>
       </form>`;
     }
-    return `<div class="subabas">${sub('pagamentos', 'Pagamentos')}${sub('jogadores', 'Jogadores')}${sub('relatorios', 'Relatórios')}${sub('config', 'Ajustes')}</div>${corpo}`;
+    return `<div class="subabas quebra">${sub('pagamentos', 'Pagamentos')}${sub('multas', 'Multas')}${sub('jogadores', 'Jogadores')}${sub('sumula', 'Súmula')}${sub('financeiro', 'Financeiro')}${sub('historico', 'Histórico')}${sub('relatorios', 'Relatórios')}${sub('config', 'Ajustes')}</div>${corpo}`;
   }
 
   function render() {
@@ -605,26 +1117,56 @@
     $app.innerHTML = `
       <header class="topo"><img class="logo" src="logo.webp" alt=""><div><h1>${esc(dados.config.nome_grupo)}</h1><small>Olá, ${esc(meu.nome)}</small></div></header>
       ${DEMO ? '<div class="faixa">Modo demonstração: os dados ficam só neste aparelho. <button class="link" data-acao="reiniciar-demo">Recomeçar do zero</button></div>' : ''}
-      ${aba === 'jogo' ? telaJogo() : aba === 'historico' ? telaHistorico() : aba === 'pagamento' ? telaPagamento() : telaAdmin()}
-      <nav class="abas">${botaoAba('jogo', 'Jogo')}${botaoAba('historico', 'Histórico')}${botaoAba('pagamento', 'Pagamento')}${meu.admin ? botaoAba('admin', 'Organizar') : ''}</nav>`;
+      ${aba === 'jogo' ? telaJogo() : aba === 'ranking' ? telaRanking() : aba === 'pagamento' ? telaPagamento() : aba === 'perfil' ? telaPerfil() : telaAdmin()}
+      <nav class="abas">${botaoAba('jogo', 'Jogo')}${botaoAba('ranking', 'Ranking')}${botaoAba('pagamento', 'Pagamento')}${botaoAba('perfil', 'Perfil')}${meu.admin ? botaoAba('admin', 'Organizar') : ''}</nav>`;
   }
 
   // ---------- Ações ----------
 
   const acoes = {
-    'aba': (b) => { aba = b.dataset.v; render(); window.scrollTo(0, 0); },
-    'admin-aba': async (b) => {
-      adminAba = b.dataset.v;
+    'aba': (b) => {
+      aba = b.dataset.v;
+      if (aba === 'perfil') perfilId = null;
       render();
-      if (adminAba !== 'relatorios') return;
-      try { relatorioDados = await api.relatorio(); } catch (e) { aviso(e.message, true); }
-      render();
+      window.scrollTo(0, 0);
+      if (aba === 'ranking') carregarRanking(rankingAno);
+      if (aba === 'perfil') carregarPerfil();
+      if (aba === 'admin') abrirAdminAba();
+    },
+    'admin-aba': (b) => { adminAba = b.dataset.v; render(); abrirAdminAba(); },
+    'ranking-ordem': (b) => { rankingOrdem = b.dataset.v; render(); },
+    'ver-perfil': (b) => { perfilId = b.dataset.id; aba = 'perfil'; render(); window.scrollTo(0, 0); carregarPerfil(); },
+    'meu-perfil': () => { perfilId = null; render(); carregarPerfil(); },
+    'trocar-senha': () => {
+      const senha = prompt('Digite a nova senha (mínimo de 6 caracteres):');
+      if (senha === null) return;
+      if (senha.length < 6) return aviso('A senha precisa ter pelo menos 6 caracteres.', true);
+      executar(() => api.novaSenha(senha), 'Senha alterada.');
+    },
+    'sumula-tirar': (b) => { delete sumulaValores[b.dataset.id]; render(); },
+    'salvar-sumula': () => {
+      const linhas = Object.entries(sumulaValores).map(([user_id, v]) => ({ user_id, gols: v.gols, assistencias: v.assistencias }));
+      const partidaId = sumula.partidaId;
+      executar(async () => {
+        await api.salvarSumula(partidaId, linhas);
+        Object.keys(rankings).forEach((ano) => delete rankings[ano]); // os rankings mudaram
+        await carregarSumula(partidaId);
+      }, 'Súmula salva.');
+    },
+    'fin-mes': (b) => { financeiroMes = somaMes(financeiroMes, Number(b.dataset.v)); render(); },
+    'fin-excluir': (b) => {
+      if (!confirm('Excluir este lançamento?')) return;
+      executar(async () => { await api.excluirLancamento(Number(b.dataset.id)); financeiro = await api.financeiro(); });
     },
     'auth-modo': (b) => { authModo = b.dataset.v; render(); },
     'atualizar': () => executar(async () => {}, 'Lista atualizada.'),
     'confirmar': () => executar(() => api.confirmar(dados.partida.id, dados.eu)),
     'cancelar': () => {
-      if (confirm('Cancelar sua presença? Se confirmar de novo depois, você volta para o fim da fila.'))
+      const a = alocacao();
+      const convocado = [...a.jogadores, ...a.goleiros].some((i) => i.user_id === dados.eu);
+      const multa = a.passouCorte && convocado ? Number(dados.config.multa_saida || 0) : 0;
+      if (confirm('Cancelar sua presença? Se confirmar de novo depois, você volta para o fim da fila.'
+        + (multa ? `\n\nAtenção: sair da lista depois das 17h gera multa de ${fmtValor(multa)}.` : '')))
         executar(() => api.cancelar(dados.partida.id, dados.eu));
     },
     'remover': (b) => {
@@ -641,8 +1183,34 @@
     },
     'pago-mensal': (b) => {
       const id = b.dataset.id, pg = pagoMensal(id);
-      executar(() => pg ? api.desmarcarPago(pg.id)
-        : api.marcarPago({ user_id: id, tipo: 'mensal', mes: mesDaPartida(), valor: dados.config.valor_mensal }));
+      executar(() => pg ? api.desmarcarMensalidade(id, mesDaPartida())
+        : api.marcarMensalidade(id, mesDaPartida(), dados.config.valor_mensal));
+    },
+    'rebaixar': () => {
+      const nomes = inadimplentesAnterior.map((p) => p.nome).join(', ');
+      if (!confirm(`Transformar em diaristas: ${nomes}?\n\nEles perdem a vaga fixa. Você pode voltar cada um para mensalista em Jogadores.`)) return;
+      executar(async () => {
+        const n = await api.rebaixar(mesAnterior());
+        inadimplentesAnterior = [];
+        aviso(`${n} ${n === 1 ? 'jogador virou diarista' : 'jogadores viraram diaristas'}.`);
+      });
+    },
+    'multa-pagar': (b) => executar(async () => { await api.resolverMulta(Number(b.dataset.id), 'paga'); multasAdmin = await api.multasAdmin(); }, 'Multa marcada como paga.'),
+    'multa-abonar': (b) => {
+      const motivo = prompt('Motivo do abono (fica registrado no histórico):');
+      if (motivo === null) return;
+      if (!motivo.trim()) return aviso('Escreva o motivo do abono.', true);
+      executar(async () => { await api.resolverMulta(Number(b.dataset.id), 'abonada', motivo.trim()); multasAdmin = await api.multasAdmin(); }, 'Multa abonada.');
+    },
+    'multa-reabrir': (b) => executar(async () => { await api.resolverMulta(Number(b.dataset.id), 'pendente'); multasAdmin = await api.multasAdmin(); }),
+    'multa-excluir': (b) => {
+      if (!confirm('Excluir esta multa? Use "Abonar" se quiser manter o registro com a justificativa.')) return;
+      executar(async () => { await api.excluirMulta(Number(b.dataset.id)); multasAdmin = await api.multasAdmin(); });
+    },
+    'fin-whatsapp': () => { window.open('https://wa.me/?text=' + encodeURIComponent(textoDasContas()), '_blank', 'noopener'); },
+    'fin-copiar': async () => {
+      try { await navigator.clipboard.writeText(textoDasContas()); aviso('Prestação de contas copiada.'); }
+      catch (e) { aviso('Não foi possível copiar.', true); }
     },
     'pago-partida': (b) => {
       const id = b.dataset.id, pg = pagoPartida(id);
@@ -653,7 +1221,7 @@
       try { await navigator.clipboard.writeText(dados.config.chave_pix); aviso('Chave Pix copiada.'); }
       catch (e) { aviso('Não foi possível copiar. Selecione a chave e copie manualmente.', true); }
     },
-    'sair': () => { authModo = 'entrar'; executar(() => api.sair()); },
+    'sair': () => { authModo = 'entrar'; aba = 'jogo'; perfilId = null; executar(() => api.sair()); },
     'reiniciar-demo': () => {
       if (!confirm('Apagar as contas e os dados da demonstração neste aparelho?')) return;
       try { localStorage.removeItem('pelada-demo-v1'); } catch (e) { /* nada a apagar */ }
@@ -666,8 +1234,27 @@
     if (b && acoes[b.dataset.acao]) acoes[b.dataset.acao](b);
   });
 
+  // Carrega o que a sub-aba aberta em Organizar precisa.
+  function abrirAdminAba() {
+    if (adminAba === 'relatorios') carregarTela(async () => { relatorioDados = await api.relatorio(); });
+    if (adminAba === 'sumula') carregarSumula(sumula ? sumula.partidaId : null);
+    if (adminAba === 'financeiro') carregarFinanceiro();
+    if (adminAba === 'multas') carregarMultas();
+    if (adminAba === 'pagamentos') carregarInadimplentes();
+  }
+
+  // Guarda o que o administrador digita na súmula, para não perder ao redesenhar a tela.
+  $app.addEventListener('input', (e) => {
+    const el = e.target;
+    if (!el.dataset.sumula || !sumulaValores[el.dataset.sumula]) return;
+    sumulaValores[el.dataset.sumula][el.dataset.campo] = Math.min(99, Math.max(0, parseInt(el.value, 10) || 0));
+  });
+
   $app.addEventListener('change', (e) => {
     const el = e.target;
+    if (el.dataset.mudar === 'ranking-ano') { rankingAno = Number(el.value); render(); if (!rankings[rankingAno]) carregarRanking(rankingAno); return; }
+    if (el.dataset.mudar === 'sumula-partida') { carregarSumula(sumula.partidas.find((p) => String(p.id) === el.value).id); return; }
+    if (el.dataset.mudar === 'sumula-add') { if (el.value) { sumulaValores[el.value] = { gols: 0, assistencias: 0 }; render(); } return; }
     if (!el.dataset.perfil) return;
     const valor = el.type === 'checkbox' ? el.checked : el.value;
     executar(() => api.atualizarPerfil(el.dataset.perfil, { [el.dataset.campo]: valor }), 'Jogador atualizado.');
@@ -678,10 +1265,30 @@
     const form = e.target;
     const f = Object.fromEntries(new FormData(form));
     if (form.dataset.form === 'config') {
-      executar(() => api.salvarConfig({
+      const campos = {
         nome_grupo: f.nome_grupo.trim(), vagas: Number(f.vagas), valor_mensal: Number(f.valor_mensal),
         valor_diaria: Number(f.valor_diaria), chave_pix: f.chave_pix.trim(),
-      }), 'Configurações salvas.');
+      };
+      if (f.multa_falta !== undefined) Object.assign(campos, {
+        multa_mensal_apos_10: Number(f.multa_mensal_apos_10), multa_mensal_apos_20: Number(f.multa_mensal_apos_20),
+        multa_falta: Number(f.multa_falta), multa_saida: Number(f.multa_saida),
+        rebaixar_automatico: f.rebaixar_automatico === 'on',
+      });
+      executar(() => api.salvarConfig(campos), 'Configurações salvas.');
+      return;
+    }
+    if (form.dataset.form === 'multa') {
+      executar(async () => {
+        await api.salvarMulta({ user_id: f.user_id, descricao: f.descricao.trim(), valor: Number(f.valor) });
+        multasAdmin = await api.multasAdmin();
+      }, 'Multa lançada.');
+      return;
+    }
+    if (form.dataset.form === 'lancamento') {
+      executar(async () => {
+        await api.salvarLancamento({ mes: financeiroMes, tipo: f.tipo, descricao: f.descricao.trim(), valor: Number(f.valor) });
+        financeiro = await api.financeiro();
+      }, 'Lançamento salvo.');
       return;
     }
     executar(async () => {
